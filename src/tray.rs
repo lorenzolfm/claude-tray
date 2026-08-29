@@ -146,6 +146,21 @@ impl ksni::Tray for ClaudeTray {
         self.refresh();
     }
 
+    /// The applet outlives any particular tray host: systemd starts it at login, Waybar claims
+    /// the watcher later, and a Waybar restart drops and reclaims it. ksni handles the
+    /// re-registration; these two exist so the journal can tell the two invisible states apart —
+    /// *waiting for a bar* and *actually broken* look identical in the tray, which is precisely
+    /// the confusion this applet was built to end.
+    fn watcher_online(&self) {
+        eprintln!("claude-tray: tray host appeared, item registered");
+    }
+
+    fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
+        eprintln!("claude-tray: no tray host ({reason:?}), waiting for one");
+        // Keep the service alive and keep polling; the item re-registers when a host returns.
+        true
+    }
+
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let snap = match &self.view {
             View::Broken(e) => {

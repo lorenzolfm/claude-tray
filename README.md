@@ -92,6 +92,51 @@ nix profile install github:lorenzolfm/claude-tray
 Needs `claude-agents` on `PATH` and a session bus. The nix package pins a font carrying `◇◆◈⊘○·`
 via `CLAUDE_TRAY_FONT`; a `cargo` build falls back to fontconfig.
 
+## Autostart
+
+It does **not** need to start after the bar. `ksni` is built with `assume_sni_available(true)`, so
+a missing `org.kde.StatusNotifierWatcher` is a wait rather than an error, and the item registers
+itself whenever a host appears — at login and after every bar restart alike. `journalctl --user -u
+claude-tray` distinguishes the two invisible states:
+
+```
+claude-tray: no tray host (…), waiting for one
+claude-tray: tray host appeared, item registered
+```
+
+⚠️ **This matters more than it looks.** Waybar is typically a compositor `exec-once`, so it starts
+*after* the systemd user manager — a unit ordered "after the tray host" is not merely awkward, it is
+impossible. Without `assume_sni_available` the applet exits 1 at every login, and systemd's default
+start limit then leaves it dead for good.
+
+A minimal user unit:
+
+```ini
+[Unit]
+Description=Claude Code session tray applet
+Requires=dbus.socket
+After=dbus.socket
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=%h/.nix-profile/bin/claude-tray
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+⚠️ **On NixOS, set the unit's `PATH` explicitly.** NixOS gives user units a sanitised environment
+holding only coreutils, findutils, grep, sed and systemd — it overrides the user manager's own PATH,
+so both `claude-agents` and `zellij` go missing and the applet shows only `⊘` with a dead jump.
+Neither should be pinned to a store path: `claude-agents` so it stays upgradeable underneath, and
+`zellij` because the jump talks to a **running server** and a different build would speak to it
+wrongly.
+
+⚠️ `%h` is expanded in `ExecStart` but **not** in `Environment=`, so a PATH pointing into `$HOME`
+must be written out in full.
+
 ## Notes on the rendering
 
 Everything below was observed in a real Waybar 0.15.0, not reasoned about.

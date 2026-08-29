@@ -50,7 +50,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let handle = tray::ClaudeTray::new(renderer).spawn()?;
+    // 🔴 Waybar is a Hyprland `exec-once`, so it claims the watcher *after* the systemd user
+    // manager has already started us. Without this the first `spawn()` loses that race every
+    // login and exits 1. `assume_sni_available` turns "no tray host yet" from an exit into a
+    // wait: ksni keeps the item and registers it when the host appears, and again after every
+    // Waybar restart. The cost is that a box with genuinely no tray support fails silently
+    // instead of loudly, which is why `watcher_offline` leaves a line in the journal.
+    let handle = tray::ClaudeTray::new(renderer)
+        .assume_sni_available(true)
+        .spawn()?;
 
     loop {
         std::thread::sleep(POLL);
@@ -58,8 +66,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .update(|t: &mut tray::ClaudeTray| t.refresh())
             .is_none()
         {
-            // The tray service is gone; there is no bar to update any more.
-            return Ok(());
+            // The tray service is gone; there is no bar to update any more. This is a
+            // failure, not a clean finish — exit non-zero so the supervisor brings us back
+            // rather than leaving the bar permanently empty.
+            eprintln!("claude-tray: tray service stopped unexpectedly");
+            std::process::exit(1);
         }
     }
 }
