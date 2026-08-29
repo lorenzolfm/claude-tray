@@ -102,8 +102,19 @@ const SWITCH_POLL: Duration = Duration::from_millis(50);
 /// goes away this stops being invisible: a bare `^E` would reach the pane instead.
 const WAKE_KEY: &str = "e";
 
-/// Hyprland's modifier bitmask for Ctrl.
-const WAKE_MODS: u32 = 4;
+/// The modifier the wake key is held with, as `hl.dsp.send_shortcut` spells it.
+///
+/// 🔴 **It has to be the modifier's *name*, not Hyprland's numeric modmask.** `mods=4` — the
+/// mask `hyprctl dispatch sendshortcut` takes — is accepted by the Lua dispatcher without a
+/// word of complaint and then silently dropped: the window receives `0x65`, a bare `e`, exactly
+/// as it does for `mods=0`. `mods="CTRL"` delivers `0x05`. Measured against a ghostty in raw
+/// mode, one dispatch per encoding.
+///
+/// ⚠️ That is what made every click type `ee` into the focused pane. A bare `e` is not bound in
+/// zellij, so nothing consumed it and both wake keys reached the program in the pane — the one
+/// failure mode `WAKE_KEY`'s note says to watch for, arriving through the modifier rather than
+/// through a lost binding.
+const WAKE_MODS: &str = "CTRL";
 
 /// Long enough for zellij to have taken the first key before the second arrives.
 const WAKE_GAP: Duration = Duration::from_millis(60);
@@ -258,7 +269,7 @@ fn wake(window: u32) -> Result<(), String> {
 fn wake_lua(window: u32) -> String {
     format!(
         "for _,w in ipairs(hl.get_windows()) do if w.pid=={window} then \
-         hl.dispatch(hl.dsp.send_shortcut{{mods={WAKE_MODS},key=\"{WAKE_KEY}\",window=w}}) \
+         hl.dispatch(hl.dsp.send_shortcut{{mods=\"{WAKE_MODS}\",key=\"{WAKE_KEY}\",window=w}}) \
          return \"sent\" end end return \"none\""
     )
 }
@@ -763,7 +774,9 @@ u_str ESTAB 0 0 /run/user/1000/wayland-1 900 * 901 users:((\"ghostty\",pid=5091,
     fn wake_lua_sends_ctrl_e_to_one_window() {
         let lua = wake_lua(5091);
         assert!(lua.contains("w.pid==5091"), "{lua}");
-        assert!(lua.contains("mods=4,key=\"e\""), "{lua}");
+        // 🔴 The modifier is a name, not the numeric modmask — `mods=4` is dropped in silence
+        // and the pane receives a bare `e`. See `WAKE_MODS`.
+        assert!(lua.contains("mods=\"CTRL\",key=\"e\""), "{lua}");
         assert!(lua.contains("hl.dsp.send_shortcut"), "{lua}");
     }
 
