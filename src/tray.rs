@@ -66,9 +66,10 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// One menu row. Clicking it focuses the pane; a row with nowhere to go is inert but still
-/// readable, and a dormant row is `enabled: false` — which reads as *dimmed*, i.e. secondary,
-/// rather than as broken.
+/// One menu row. Clicking it puts him in front of that session — see [`crate::jump`], which
+/// raises the window showing it or opens one that does. A row with nowhere to go is inert but
+/// still readable, and a dormant row is `enabled: false` — which reads as *dimmed*, i.e.
+/// secondary, rather than as broken.
 fn row(entry: &Entry) -> MenuItem<ClaudeTray> {
     let target = entry.target.clone();
     StandardItem {
