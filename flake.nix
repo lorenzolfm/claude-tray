@@ -62,9 +62,15 @@
             nativeBuildInputs = [pkgs.makeWrapper];
 
             # The Claude mark needs no font — it is rasterised from `assets/claude-mark.svg`.
-            # The badge and the menu do, so a font carrying ⊘◆◈○· and the digits has to be
-            # *there*. Pinning it in the wrapper means the tray cannot come up
-            # blank because fontconfig on some other machine resolves DejaVu Sans elsewhere.
+            # The badge does, so a font carrying ⊘ and the digits has to be *there*. Pinning it
+            # in the wrapper means the tray cannot come up blank because fontconfig on some
+            # other machine resolves DejaVu Sans elsewhere.
+            #
+            # ⚠️ This does NOT reach the menu, and the wording here used to claim it did. The
+            # menu is drawn by the tray host with the *system* font stack, so its 🙋 ☕ 🐚 🛸 and
+            # its braille spinner need a colour emoji font on the box — Pango tags them
+            # `lang=und-zsye` and resolves the `emoji` family, which on this one lands on
+            # Noto Color Emoji. Pinning it here would do nothing; there is no variable to set.
             #
             # `claude-agents` is deliberately NOT pinned here. It is the thing this applet
             # reads the world through, and Lorenzo upgrades it on its own cadence; wiring a

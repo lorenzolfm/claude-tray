@@ -14,6 +14,13 @@
 //! The mark never changes — it is identity, not state. Everything that varies is the badge
 //! beside it, and its colour is what the old `◇`/`◆`/`◈` glyph pair used to carry.
 //!
+//! One click down, the menu draws each session with `zj-picker`'s glyph for its status —
+//! 🙋 `waiting`, ☕ `idle`, 🐚 `shell`, 🛸 anything else, and a braille spinner that actually
+//! turns for `busy`. 🔴 **That table is `zj-picker`'s and this end does not get a vote**: the
+//! same agent read on two surfaces has to be the same picture. What this applet believes *on
+//! top* of the status — counted or not, your turn or aged out — is in the word beside the glyph
+//! and the block the row sits in. See [`state::Entry::glyph`].
+//!
 //! # Shape
 //!
 //! - [`agents`] shells out to `claude-agents` and parses nine TAB-separated columns. 🔴 It does
@@ -38,12 +45,24 @@ mod state;
 mod tray;
 
 use ksni::blocking::TrayMethods;
+use std::sync::Arc;
 use std::time::Duration;
 
+/// The animation tick — ten a second, which is what the busy spinner needs to read as motion
+/// rather than as a glyph that keeps changing its mind. `zj-picker`'s rate, so the two spin at
+/// the same speed as well as with the same frames.
+///
+/// ⚠️ This is **not** the poll interval, and the two were the same number until the spinner
+/// arrived. See [`TICKS_PER_POLL`]: speeding this up without that divisor would quietly have
+/// taken `claude-agents` from one process every five seconds to ten every second.
+const TICK: Duration = Duration::from_millis(100);
+
+/// Animation ticks per poll, so the producer still runs once every five seconds.
+///
 /// Cheap — a process spawn and a few small reads — but not free, and nothing on screen changes
 /// faster than a human notices. The menu additionally re-polls on the way to opening, so this
 /// interval only governs how quickly the *badge* catches up.
-const POLL: Duration = Duration::from_secs(5);
+const TICKS_PER_POLL: u64 = 50;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let renderer = match icon::Renderer::load() {
@@ -62,14 +81,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // wait: ksni keeps the item and registers it when the host appears, and again after every
     // Waybar restart. The cost is that a box with genuinely no tray support fails silently
     // instead of loudly, which is why `watcher_offline` leaves a line in the journal.
-    let handle = tray::ClaudeTray::new(renderer)
+    let anim = Arc::new(tray::Animation::default());
+    let handle = tray::ClaudeTray::new(renderer, Arc::clone(&anim))
         .assume_sni_available(true)
         .spawn()?;
 
+    let mut ticks: u64 = 0;
     loop {
-        std::thread::sleep(POLL);
+        std::thread::sleep(TICK);
+        ticks += 1;
+        // Always, so the spinner's phase follows the wall clock rather than however long the
+        // menu happened to be open — a menu reopened a second later picks the cycle up where it
+        // would have been, not where it was left.
+        anim.advance();
+
+        // 🔴 Two different reasons to repaint, and only one of them asks the producer anything.
+        // A tick that is neither is spent by saying so: `Handle::update` rebuilds the whole menu
+        // and re-renders the pixmap just to diff them, so calling it on every tick would burn
+        // that ten times a second to put back pixels nobody is looking at.
+        let poll = ticks.is_multiple_of(TICKS_PER_POLL);
+        if !poll && !anim.is_spinning() {
+            continue;
+        }
+
         if handle
-            .update(|t: &mut tray::ClaudeTray| t.refresh())
+            .update(|t: &mut tray::ClaudeTray| {
+                if poll {
+                    t.refresh();
+                }
+            })
             .is_none()
         {
             // The tray service is gone; there is no bar to update any more. This is a
