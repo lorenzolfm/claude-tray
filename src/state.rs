@@ -118,24 +118,17 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    pub fn tray_glyph(&self) -> char {
-        if self.badge == 0 {
-            '\u{25C7}' // ◇ — calm, not broken
-        } else if self.blocked {
-            '\u{25C8}' // ◈
-        } else {
-            '\u{25C6}' // ◆
-        }
-    }
-
-    /// What the pixmap spells out. `◆ 3` spaced: the space is what stops the glyph and the
-    /// count reading as a single token, and a bare count reads as a stray number beside the
-    /// battery percentage.
+    /// What the pixmap spells beside the mark. **Empty when there is nothing to do** — calm is
+    /// the bare mark, not a `0`, because a zero is still something to read.
+    ///
+    /// 🔴 This used to prefix a glyph (`◇`/`◆ 3`/`◈ 2`). The mark took that slot, so the
+    /// blocked-vs-merely-finished distinction moved into the *colour* of this count — see
+    /// [`Snapshot::blocked`] and `crate::icon::BLOCKED`. Nothing was dropped, only recoloured.
     pub fn badge_text(&self) -> String {
         if self.badge == 0 {
-            self.tray_glyph().to_string()
+            String::new()
         } else {
-            format!("{} {}", self.tray_glyph(), self.badge)
+            self.badge.to_string()
         }
     }
 
@@ -310,7 +303,11 @@ mod tests {
         let snap = snapshot(&[row("idle", 99_999, 99_999)], NOW);
         assert_eq!(snap.badge, 0);
         assert_eq!(snap.iter(State::Dormant).count(), 1);
-        assert_eq!(snap.tray_glyph(), '\u{25C7}');
+        assert_eq!(
+            snap.badge_text(),
+            "",
+            "a dormant row is uncounted, so the mark stands alone"
+        );
     }
 
     #[test]
@@ -337,19 +334,26 @@ mod tests {
         );
     }
 
-    /// ◈ over ◆ is not decoration: it says *blocked* rather than merely *finished*, which is
-    /// the difference between "come back when you can" and "nothing is moving".
+    /// 🔴 Calm spells **nothing**, not `0`. The mark alone is the calm state; a zero beside it
+    /// is one more number in a bar full of them, and it would have to be read to be dismissed.
     #[test]
-    fn the_glyph_distinguishes_blocked_from_merely_finished() {
-        assert_eq!(snapshot(&[], NOW).badge_text(), "\u{25C7}");
-        assert_eq!(
-            snapshot(&[row("idle", 60, 900)], NOW).badge_text(),
-            "\u{25C6} 1"
-        );
+    fn calm_spells_nothing_and_otherwise_the_count() {
+        assert_eq!(snapshot(&[], NOW).badge_text(), "");
+        assert_eq!(snapshot(&[row("busy", 60, 900)], NOW).badge_text(), "");
+        assert_eq!(snapshot(&[row("idle", 60, 900)], NOW).badge_text(), "1");
         assert_eq!(
             snapshot(&[row("waiting", 60, 900), row("idle", 60, 900)], NOW).badge_text(),
-            "\u{25C8} 2"
+            "2"
         );
+    }
+
+    /// *Blocked* rather than merely *finished* is the difference between "nothing is moving"
+    /// and "come back when you can". The count reads the same either way, so `blocked` is what
+    /// the icon colours it by — losing this flag would silently flatten the two.
+    #[test]
+    fn blocked_is_flagged_separately_from_the_count() {
+        assert!(!snapshot(&[row("idle", 60, 900)], NOW).blocked);
+        assert!(snapshot(&[row("waiting", 60, 900), row("idle", 60, 900)], NOW).blocked);
     }
 
     #[test]

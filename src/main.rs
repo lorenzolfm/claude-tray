@@ -2,14 +2,17 @@
 //!
 //! Lorenzo runs many concurrent Claude Code sessions inside zellij and cannot tell which ones
 //! need input or have finished. This publishes a StatusNotifierItem so that state is ambient:
-//! a glyph and a count always in the bar, the session list one click away.
+//! the Claude mark and a count always in the bar, the session list one click away.
 //!
 //! ```text
-//!   ◇        nothing wants you
-//!   ◆ 3      three finished their turn
-//!   ◈ 2      at least one is blocked on you
-//!   ⊘        claude-agents could not be run
+//!   ✻        nothing wants you                  (the mark, alone)
+//!   ✻ 3      three finished their turn          (count in the mark's own terracotta)
+//!   ✻ 2      at least one is blocked on you     (count in amber)
+//!   ✻ ⊘      claude-agents could not be run     (⊘ in red)
 //! ```
+//!
+//! The mark never changes — it is identity, not state. Everything that varies is the badge
+//! beside it, and its colour is what the old `◇`/`◆`/`◈` glyph pair used to carry.
 //!
 //! # Shape
 //!
@@ -18,7 +21,9 @@
 //!   applet and `zj-picker` cannot disagree about what is alive.
 //! - [`state`] owns the whole mapping from raw status to what is shown, because the thing that
 //!   draws the badge and the thing that builds the menu must be the same thing.
-//! - [`icon`] rasterises the badge. [`jump`] focuses a pane. [`tray`] is the SNI item.
+//! - [`mark`] rasterises the Claude mark from the official SVG, at whatever height the bar
+//!   asks for. [`icon`] composes it with the badge. [`jump`] focuses a pane. [`tray`] is the
+//!   SNI item.
 //!
 //! # Running
 //!
@@ -28,6 +33,7 @@
 mod agents;
 mod icon;
 mod jump;
+mod mark;
 mod state;
 mod tray;
 

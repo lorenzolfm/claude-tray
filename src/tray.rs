@@ -1,6 +1,6 @@
 //! The StatusNotifierItem itself: what Waybar reads, and what the menu says.
 
-use crate::icon::Renderer;
+use crate::icon::{BLOCKED, COUNT, FAULT, Renderer};
 use crate::state::{Entry, Snapshot, State, snapshot};
 use crate::{agents, jump};
 use ksni::menu::StandardItem;
@@ -37,13 +37,22 @@ impl ClaudeTray {
         };
     }
 
-    /// `⊘` re-scoped. It meant *unreachable* in the two-machine design, which cannot happen on
-    /// one box — but a producer that is missing or exiting non-zero is real, and this is the
-    /// right shape for it: visibly not the calm `◇`, visibly not a count.
-    fn badge_text(&self) -> String {
+    /// What goes beside the mark, and in what colour. 🔴 **The mark itself is never part of
+    /// this** — it is identity, and it stays [`crate::mark::CLAUDE`] in every state. Three things can
+    /// appear here and each has exactly one meaning:
+    ///
+    /// - nothing, in the calm case — the mark alone;
+    /// - the count in [`COUNT`], the bar's own foreground, when turns have merely finished;
+    /// - the count in [`BLOCKED`] amber when at least one session is *stuck on him*, which is
+    ///   what the retired `◈` glyph used to say;
+    /// - `⊘` in [`FAULT`] red — not "you have work" but *the applet cannot see*. `⊘` was
+    ///   originally *unreachable*, which cannot happen on one box; a producer that is missing
+    ///   or exiting non-zero is the real failure, and it inherits the shape.
+    fn badge(&self) -> (String, [u8; 3]) {
         match &self.view {
-            View::Agents(s) => s.badge_text(),
-            View::Broken(_) => "\u{2298}".to_string(),
+            View::Broken(_) => ("\u{2298}".to_string(), FAULT),
+            View::Agents(s) if s.blocked => (s.badge_text(), BLOCKED),
+            View::Agents(s) => (s.badge_text(), COUNT),
         }
     }
 }
@@ -104,7 +113,8 @@ impl ksni::Tray for ClaudeTray {
     }
 
     fn icon_pixmap(&self) -> Vec<Icon> {
-        vec![self.renderer.render(&self.badge_text())]
+        let (badge, rgb) = self.badge();
+        vec![self.renderer.render(&badge, rgb)]
     }
 
     fn title(&self) -> String {
@@ -117,11 +127,13 @@ impl ksni::Tray for ClaudeTray {
 
     /// 🔴 **Never `Passive`.** Waybar's `show-passive-items` defaults to false and it hides
     /// passive items outright, so a calm applet marked passive would *vanish* rather than sit
-    /// there rendering `◇` — the exact failure this whole effort exists to prevent.
+    /// there showing the bare mark — the exact failure this whole effort exists to prevent.
     ///
     /// `NeedsAttention` cannot carry its own pixmap (`AttentionIconPixmap` is an unimplemented
-    /// TODO in Waybar), but `Item::setStatus` does add a `needs-attention` CSS class. So this
-    /// is how colour reaches `style.css` while the pixmap stays monochrome and themeable.
+    /// TODO in Waybar), but `Item::setStatus` does add a `needs-attention` CSS class — and a
+    /// tray item being a `Gtk::Image`, the only thing that class can actually do is draw a
+    /// border. So this is the *second* cue, under the badge: the pixmap says what and how many,
+    /// the border says look now.
     fn status(&self) -> Status {
         match &self.view {
             View::Agents(s) => {

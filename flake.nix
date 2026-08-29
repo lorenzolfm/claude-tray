@@ -32,7 +32,17 @@
         craneLib = (crane.mkLib pkgs).overrideToolchain (p:
           p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml);
 
-        src = craneLib.cleanCargoSource ./.;
+        # ⚠️ `cleanCargoSource` alone keeps only Rust and Cargo files, so `assets/` never
+        # reaches the builder and `include_str!` in src/mark.rs fails with a bare
+        # "No such file or directory" — a build error that says nothing about filtering.
+        # The mark is source, not a resource, so it has to be let through explicitly.
+        src = pkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = pkgs.lib.fileset.unions [
+            (craneLib.fileset.commonCargoSources ./.)
+            ./assets
+          ];
+        };
 
         commonArgs = {
           inherit src;
@@ -51,8 +61,9 @@
 
             nativeBuildInputs = [pkgs.makeWrapper];
 
-            # The badge is rasterised from a font at runtime, so a font carrying ◇◆◈⊘○·
-            # has to be *there*. Pinning it in the wrapper means the tray cannot come up
+            # The Claude mark needs no font — it is rasterised from `assets/claude-mark.svg`.
+            # The badge and the menu do, so a font carrying ⊘◆◈○· and the digits has to be
+            # *there*. Pinning it in the wrapper means the tray cannot come up
             # blank because fontconfig on some other machine resolves DejaVu Sans elsewhere.
             #
             # `claude-agents` is deliberately NOT pinned here. It is the thing this applet

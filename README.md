@@ -3,11 +3,15 @@
 Which Claude Code sessions are waiting on you, in the system tray.
 
 ```text
-  ◇        nothing wants you
-  ◆ 3      three finished their turn
-  ◈ 2      at least one is blocked on you
-  ⊘        claude-agents could not be run
+  ✻        nothing wants you                (the Claude mark, alone)
+  ✻ 3      three finished their turn        (count in the bar's foreground)
+  ✻ 2      at least one is blocked on you   (count in amber)
+  ✻ ⊘      claude-agents could not be run   (⊘ in red)
 ```
+
+**The mark never changes.** It is identity, not state — the same terracotta burst in every
+case, so the applet is recognisable at a glance as *the Claude one* rather than as a shape you
+have to decode. Everything that varies is the badge beside it.
 
 Click it and the menu lists every live agent; click a row and that agent's zellij pane takes
 focus.
@@ -65,12 +69,41 @@ Ordering is this program's job: `claude-agents` sorts for clean diffs and says s
 **actionable first, then oldest first** — within a group, the row waiting longest is the one
 ignored longest.
 
+## The mark
+
+`assets/claude-mark.svg` is Claude's own `favicon.svg`, vendored verbatim: one closed path in a
+248×248 box, filled `#D97757`. `src/mark.rs` rasterises it at exactly `icon-size` with a scanline
+filler — supersampled in `y`, analytic in `x` — rather than shipping a bitmap.
+
+🔴 **That is not gold-plating, it is the cheaper option.** A committed PNG would be one fixed
+size that Waybar then resamples, and Waybar's downscale is visibly blurrier than a native render
+(see *Notes on the rendering*). Rasterising instead costs ~90 lines, no dependency, and stays
+crisp at any `icon-size`. It is checked against the artwork it imitates: Claude's `favicon.ico`
+ships the mark pre-rendered at 48, 32 and 16 px, all three inking **0.3589** of their box, and
+the filler lands within 0.002 of that at every size.
+
 ## Colour
 
-The applet sets SNI status `NeedsAttention` whenever the badge is non-zero (and when the producer
-is broken — `⊘` with no badge at all is not the same claim as a badge of `0`). The drawn pixmap
-stays monochrome, because Waybar's `Item::setStatus` adds a `needs-attention` CSS class and
-`AttentionIconPixmap` is an unimplemented TODO. So the cue belongs in `style.css`:
+Three colours, each meaning exactly one thing:
+
+| | | |
+|---|---|---|
+| `#D97757` | the mark, always | identity — it never changes |
+| `#fdf6e3` | the count | *n* turns have finished |
+| `#e5c07b` | the count | at least one session is **blocked on you** |
+| `#e06c75` | `⊘` | the applet **cannot see** — `claude-agents` is missing or failing |
+
+🔴 **The pixmap used to be monochrome so that colour could live in `style.css`. That reason is
+gone** — see the warning below: a tray item is a `Gtk::Image` and `color` does nothing to it. So
+colour is in the pixels or it is nowhere. Amber over off-white is what the retired `◈`-over-`◆`
+glyph pair used to say, and `#fdf6e3` is not decoration either: the mark's own terracotta was
+tried for the count and it is the dimmest thing on the bar, which is backwards. The mark is the
+part you already know; the number is the part you have to read.
+
+The applet also sets SNI status `NeedsAttention` whenever the badge is non-zero (and when the
+producer is broken — `⊘` with no badge at all is not the same claim as a badge of `0`), which
+Waybar turns into a `needs-attention` CSS class. That is the second cue, and it can only be a
+border:
 
 ```css
 #tray .needs-attention {
@@ -89,8 +122,9 @@ ignored. Any cue has to be a property of the box.
 nix profile install github:lorenzolfm/claude-tray
 ```
 
-Needs `claude-agents` on `PATH` and a session bus. The nix package pins a font carrying `◇◆◈⊘○·`
-via `CLAUDE_TRAY_FONT`; a `cargo` build falls back to fontconfig.
+Needs `claude-agents` on `PATH` and a session bus. The mark needs no font — it is rasterised
+from the vendored SVG — but the badge and the menu do, so the nix package pins one carrying
+`⊘◆◈○·` and the digits via `CLAUDE_TRAY_FONT`; a `cargo` build falls back to fontconfig.
 
 ## Autostart
 
@@ -143,8 +177,8 @@ Everything below was observed in a real Waybar 0.15.0, not reasoned about.
 
 - 🔴 **The width budget is free.** Waybar scales a tray pixmap to `icon-size` in *height* and
   preserves the aspect ratio in *width* (`src/modules/sni/item.cpp`, `Item::updateImage`). A tray
-  icon is a **height budget, not a 20×20 box** — which is the only reason a glyph *and* a count
-  fit.
+  icon is a **height budget, not a 20×20 box** — which is the only reason the mark *and* a count
+  fit side by side.
 - 🔴 **Render at the target height, never larger.** An h40 pixmap left for Waybar to downscale
   comes out visibly blurrier than an h20 one.
 - 🔴 **`IconName` must stay empty.** Waybar's `getIconPixbuf` prefers the named icon whenever the
@@ -152,7 +186,10 @@ Everything below was observed in a real Waybar 0.15.0, not reasoned about.
   everything drawn.
 - 🔴 **Never `Status::Passive`.** Waybar's `show-passive-items` defaults to false and hides
   passive items outright, so a calm applet marked passive would *vanish* rather than sit there
-  rendering `◇`.
+  showing the bare mark.
+- ⚠️ **Straight alpha, not premultiplied.** Waybar hands the ARGB32 buffer to a `GdkPixbuf`,
+  which is non-premultiplied. ⚠️ And the bytes go `A, R, G, B` — network order, not the
+  little-endian `B, G, R, A` an in-memory `u32` would give you.
 - ⚠️ **The menu columns line up only because the GTK menu font here is monospace.** That is a
   system setting, not a guarantee.
 
