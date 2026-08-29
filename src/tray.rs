@@ -5,6 +5,67 @@ use crate::state::{Entry, Snapshot, State, snapshot};
 use crate::{agents, jump};
 use ksni::menu::StandardItem;
 use ksni::{Icon, MenuItem, Status};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// How long after a menu opens the spinner keeps turning.
+///
+/// 🔴 **This is a guess, and it has to be, because there is no way to learn the menu closed.**
+/// `com.canonical.dbusmenu` announces an opening (`AboutToShow`, which reaches
+/// [`ksni::Tray::menu_about_to_show`]) and ksni 0.3.6 routes only `clicked` out of `Event`, so
+/// the `closed` the host does send falls on the floor upstream. The window is what stands in
+/// for it, and it is wrong in both directions by construction:
+///
+/// - close the menu early and the applet keeps ticking for the remainder — ten small
+///   `ItemsPropertiesUpdated` a second at nobody, though still **no producer runs**, so this
+///   costs signals and not processes;
+/// - leave it open past the minute and the spinners go still, which reads as a wedged applet
+///   rather than as a wedged agent.
+///
+/// A minute picks the second failure over the first, because staring at a tray menu for a
+/// minute is a thing nobody does and closing one after two seconds is a thing everybody does.
+const SPIN_AFTER_OPEN: u64 = 60_000;
+
+/// The animation clock, shared between the poll loop that turns it and the tray that reads it.
+///
+/// 🔴 **It is shared so that the quiet case can stay quiet.** `Handle::update` re-derives every
+/// tray property and rebuilds the whole menu in order to diff them, so *asking* the tray whether
+/// it needs a repaint would cost the same as repainting. These three cells are what let
+/// `main` decide not to call it at all, which is the difference between a busy box and an idle
+/// one for every tick where the menu is shut.
+#[derive(Debug, Default)]
+pub struct Animation {
+    /// Ticks since start. Monotonic and never reset, so every busy row in the menu turns off
+    /// one clock — which reads as one thing happening rather than as several rows each doing
+    /// their own.
+    frame: AtomicU64,
+    /// Unix millis of the last `AboutToShow`, or 0 for "never opened".
+    opened_at_ms: AtomicU64,
+    /// Did the last poll find a row whose glyph moves? Written by [`ClaudeTray::refresh`], so it
+    /// is at worst one poll stale — and a stale `true` costs a repaint, not a wrong picture.
+    spinning: AtomicBool,
+}
+
+impl Animation {
+    /// One tick. Free enough to do unconditionally, which is what keeps the spinner's phase a
+    /// function of wall-clock time rather than of how long the menu happened to be open.
+    pub fn advance(&self) {
+        self.frame.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn frame(&self) -> u64 {
+        self.frame.load(Ordering::Relaxed)
+    }
+
+    /// Is anything on screen turning right now — is this tick worth a repaint?
+    ///
+    /// Both halves, and the second is the one that matters: a busy agent nobody is *looking at*
+    /// is not a reason to repaint anything.
+    pub fn is_spinning(&self) -> bool {
+        self.spinning.load(Ordering::Relaxed)
+            && now_ms().saturating_sub(self.opened_at_ms.load(Ordering::Relaxed)) < SPIN_AFTER_OPEN
+    }
+}
 
 /// What the last poll found. An error is a state the tray *shows*, not a reason to exit —
 /// `claude-agents` missing from `PATH` is the one failure this slice can really have, and a
@@ -17,13 +78,15 @@ enum View {
 pub struct ClaudeTray {
     renderer: Renderer,
     view: View,
+    anim: Arc<Animation>,
 }
 
 impl ClaudeTray {
-    pub fn new(renderer: Renderer) -> Self {
+    pub fn new(renderer: Renderer, anim: Arc<Animation>) -> Self {
         let mut tray = Self {
             renderer,
             view: View::Broken("not polled yet".into()),
+            anim,
         };
         tray.refresh();
         tray
@@ -35,6 +98,15 @@ impl ClaudeTray {
             Ok(rows) => View::Agents(snapshot(&rows, now())),
             Err(e) => View::Broken(e.to_string()),
         };
+        // Told rather than asked, for the reason on [`Animation`]: the loop cannot read this
+        // without paying for a repaint, and a broken producer has no rows and so nothing to turn.
+        self.anim.spinning.store(
+            match &self.view {
+                View::Agents(s) => s.any_spinning(),
+                View::Broken(_) => false,
+            },
+            Ordering::Relaxed,
+        );
     }
 
     /// What goes beside the mark, and in what colour. 🔴 **The mark itself is never part of
@@ -66,6 +138,17 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Unix millis, for [`SPIN_AFTER_OPEN`]. Same clock as [`now`] rather than an `Instant`, because
+/// the two sides of [`Animation`] are on different threads and an `Instant` is not a number they
+/// can share in an atomic. An unreadable clock reads as the epoch here too — which puts every
+/// open outside the window, so the spinner stops rather than runs forever.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// One menu row. Clicking it puts him in front of that session — see [`crate::jump`], which
 /// switches the terminal he already has to that session, or opens one when there is none.
 ///
@@ -82,10 +165,10 @@ fn now() -> u64 {
 /// badge. It does not need saying a third time in a flag that also blocks the jump. So the only
 /// dimmed rows left are agents outside zellij, which have no address to send him to — where
 /// dimmed means **inert**, which is what it should have meant all along.
-fn row(entry: &Entry) -> MenuItem<ClaudeTray> {
+fn row(entry: &Entry, frame: u64) -> MenuItem<ClaudeTray> {
     let target = entry.target.clone();
     StandardItem {
-        label: entry.label(),
+        label: entry.label(frame),
         enabled: target.is_some(),
         activate: Box::new(move |_: &mut ClaudeTray| {
             if let Some(t) = &target
@@ -167,7 +250,12 @@ impl ksni::Tray for ClaudeTray {
 
     /// Poll once more on the way to opening, so the list is never a poll interval stale at the
     /// moment it is actually read.
+    ///
+    /// 🔴 And note the moment: this is the *only* signal that reaches the applet saying anyone is
+    /// looking, and it is what starts the spinner turning. See [`SPIN_AFTER_OPEN`] for the half
+    /// of the story that does not arrive.
     fn menu_about_to_show(&mut self) {
+        self.anim.opened_at_ms.store(now_ms(), Ordering::Relaxed);
         self.refresh();
     }
 
@@ -187,6 +275,7 @@ impl ksni::Tray for ClaudeTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
+        let frame = self.anim.frame();
         let snap = match &self.view {
             View::Broken(e) => {
                 return vec![note(format!("\u{2298}  {e}")), MenuItem::Separator, quit()];
@@ -202,12 +291,12 @@ impl ksni::Tray for ClaudeTray {
 
         // Actionable first — the reason the applet is in the bar at all.
         for state in [State::NeedsInput, State::YourTurn] {
-            items.extend(snap.iter(state).map(row));
+            items.extend(snap.iter(state).map(|e| row(e, frame)));
         }
 
         // Then what is merely running. A divider, because "wants you" and "is busy" are
         // different questions and the eye should not have to read the state column to tell.
-        let working: Vec<_> = snap.iter(State::Working).map(row).collect();
+        let working: Vec<_> = snap.iter(State::Working).map(|e| row(e, frame)).collect();
         if !working.is_empty() {
             if !items.is_empty() {
                 items.push(MenuItem::Separator);
@@ -217,7 +306,7 @@ impl ksni::Tray for ClaudeTray {
 
         // 🔴 And then what has aged out: **listed, dimmed, uncounted — not hidden.** An hour is
         // only a safe threshold because crossing it means *stops nagging*, not *is lost*.
-        let dormant: Vec<_> = snap.iter(State::Dormant).map(row).collect();
+        let dormant: Vec<_> = snap.iter(State::Dormant).map(|e| row(e, frame)).collect();
         if !dormant.is_empty() {
             if !items.is_empty() {
                 items.push(MenuItem::Separator);
@@ -248,6 +337,7 @@ mod tests {
     fn entry(state: State, target: Option<Target>) -> Entry {
         Entry {
             state,
+            raw_status: "idle".into(),
             title: "infra".into(),
             age_s: 60,
             target,
@@ -273,7 +363,7 @@ mod tests {
     /// insensitive, so this flag is the jump, not a shade of grey.
     #[test]
     fn a_dormant_row_can_still_be_jumped_to() {
-        assert!(enabled(&row(&entry(State::Dormant, somewhere()))));
+        assert!(enabled(&row(&entry(State::Dormant, somewhere()), 0)));
     }
 
     #[test]
@@ -284,7 +374,7 @@ mod tests {
             State::Working,
             State::Dormant,
         ] {
-            assert!(enabled(&row(&entry(state, somewhere()))), "{state:?}");
+            assert!(enabled(&row(&entry(state, somewhere()), 0)), "{state:?}");
         }
     }
 
@@ -292,6 +382,6 @@ mod tests {
     /// is readable and inert rather than a click that quietly does nothing.
     #[test]
     fn a_row_with_nowhere_to_go_is_inert() {
-        assert!(!enabled(&row(&entry(State::Working, None))));
+        assert!(!enabled(&row(&entry(State::Working, None), 0)));
     }
 }

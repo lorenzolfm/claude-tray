@@ -45,17 +45,39 @@ same session.
 
 | raw status | | shown as | counted |
 |---|---|---|---|
-| `waiting` | | **needs input** ◈ | ✅ |
-| `idle`, under an hour in state | | **your turn** ◆ | ✅ |
-| `idle`, an hour or more | | idle · | — |
-| `idle`, under 30 s since the session started | | idle · | — |
-| anything else | | working ○ | — |
+| `waiting` | | 🙋 **needs input** | ✅ |
+| `idle`, under an hour in state | | ☕ **your turn** | ✅ |
+| `idle`, an hour or more | | ☕ idle | — |
+| `idle`, under 30 s since the session started | | ☕ idle | — |
+| `busy` | | ⠋ working | — |
+| `shell` | | 🐚 working | — |
+| anything else | | 🛸 working | — |
+
+🔴 **The glyph is the status, and `zj-picker`'s agents tab is the standard for it** — its table
+verbatim, case-insensitivity included, with nothing added and nothing dropped. The same agent
+read in the picker and read here has to be the same picture; a vocabulary that forked per
+surface would be worse than no vocabulary.
+
+So the glyph carries the producer's word and *only* that. Everything this program decides on top
+of it — counted or not, *your turn* or aged out — is in the word beside the glyph and the block
+the row sits in. Two rows both reading ☕ are two `idle` agents, and the one under the divider is
+the one that stopped nagging.
+
+The spinner really turns, at ten frames a second, and only while the menu is open: `AboutToShow`
+is the one signal that says anyone is looking. There is no matching *closed* — `ksni` 0.3.6
+routes only `clicked` out of `Event` — so it keeps turning for a minute after the last open and
+then stops. Ticking is otherwise free: the producer still runs once every five seconds, and a
+tick with no spinner on screen does not even rebuild the menu.
 
 Three rules are load-bearing and are each pinned by a test:
 
 - 🔴 **Anything unrecognised is `working`, never actionable.** Version skew reaches the key set,
   not just the values, so a status nobody has seen yet is a matter of time. Failing to *working*
   fails silent; failing to actionable would invent a badge out of a typo.
+- 🔴 **Case never decides what a status is.** `zj-picker` compares every status with
+  `eq_ignore_ascii_case`, so this does too — a status that is *recognised* on one surface and
+  *unknown* on the other is two mappings again, and the unknown side is the uncounted one, so
+  the skew would hide a row rather than merely mislabel it.
 - 🔴 **The two counted states are asymmetric.** *your turn* ages out after an hour; **needs
   input never ages**, because a session blocked on a prompt does not unblock itself by being
   ignored. Do not tidy them into one threshold.
@@ -123,8 +145,14 @@ nix profile install github:lorenzolfm/claude-tray
 ```
 
 Needs `claude-agents` on `PATH` and a session bus. The mark needs no font — it is rasterised
-from the vendored SVG — but the badge and the menu do, so the nix package pins one carrying
-`⊘◆◈○·` and the digits via `CLAUDE_TRAY_FONT`; a `cargo` build falls back to fontconfig.
+from the vendored SVG — but the badge does, so the nix package pins one carrying `⊘` and the
+digits via `CLAUDE_TRAY_FONT`; a `cargo` build falls back to fontconfig.
+
+The **menu** is drawn by the tray host, not by this program, so `CLAUDE_TRAY_FONT` does not
+reach it: its 🙋 ☕ 🐚 🛸 want a colour emoji font on the box (Pango resolves the `emoji` family
+for them, which on NixOS means `noto-fonts-color-emoji`), and the braille spinner wants any of
+the usual text fonts. The columns line up only if the emoji come out two cells wide against a
+monospace menu font — best effort, as it was before, and a system setting either way.
 
 ## Autostart
 

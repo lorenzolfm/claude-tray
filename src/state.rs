@@ -26,6 +26,25 @@ const NEWBORN_S: u64 = 30;
 /// box happens to be monospace — a system setting, not a guarantee.
 const NAME_WIDTH: usize = 28;
 
+/// One turn of the busy spinner, a frame per animation tick — `zj-picker`'s cycle, copied
+/// rather than reinvented so the two surfaces these agents are read on spin alike.
+///
+/// Braille rather than the ASCII `|/-\`: every frame here is **one column wide**, so the glyph
+/// column keeps its width as the spinner turns rather than shoving the name column back and
+/// forth ten times a second for the whole time an agent is busy.
+///
+/// ⚠️ Each frame carries a **trailing space** and the emoji beside it do not. That is the whole
+/// of how this column stays aligned: an emoji is two columns wide where a braille cell is one,
+/// so the space is the second column the spinner would otherwise be missing. `zj-picker`
+/// measures its tag column with `unicode-width`; a dependency to measure five known strings is
+/// not the trade here, and it is why the padding lives *in the table* rather than in
+/// [`Entry::label`] — the format string below cannot tell the two widths apart.
+const SPINNER: [&str; 10] = ["⠋ ", "⠙ ", "⠹ ", "⠸ ", "⠼ ", "⠴ ", "⠦ ", "⠧ ", "⠇ ", "⠏ "];
+
+/// Unidentified, and deliberately not one of the four — a status this build cannot name must
+/// not be able to pass itself off as one it can. `zj-picker`'s, like the rest of the table.
+const UNKNOWN_GLYPH: &str = "🛸";
+
 /// What the applet believes about one agent.
 ///
 /// Four states, two of them counted. The split is not "urgent vs not" — it is **does this row
@@ -50,17 +69,6 @@ impl State {
         matches!(self, State::NeedsInput | State::YourTurn)
     }
 
-    /// Echoes the tray glyph vocabulary, so the shape in the bar is visibly the shape of the
-    /// rows that caused it.
-    pub fn glyph(self) -> char {
-        match self {
-            State::NeedsInput => '\u{25C8}', // ◈
-            State::YourTurn => '\u{25C6}',   // ◆
-            State::Working => '\u{25CB}',    // ○
-            State::Dormant => '\u{00B7}',    // ·
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             State::NeedsInput => "needs input",
@@ -82,6 +90,13 @@ pub struct Target {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub state: State,
+    /// Verbatim from the producer, and what [`Entry::glyph`] draws the row's picture from.
+    ///
+    /// 🔴 **It decides the picture and nothing else.** Whether a row is counted, where it
+    /// sorts, and what word appears beside it are all [`State`]'s, via `classify` — the two
+    /// read the same word by the same rule and reach different questions, which is what keeps
+    /// `zj-picker`'s vocabulary and this applet's judgment from becoming two mappings.
+    pub raw_status: String,
     /// What this row calls the agent — its **zellij session name**, which is the string
     /// Lorenzo navigates by. Filled in by `name_rows`, because a session name can only be
     /// judged sufficient against the other rows in the same menu.
@@ -91,15 +106,61 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// The picture on this row.
+    ///
+    /// 🔴 **Keyed by the producer's word, and `zj-picker`'s agents tab is the standard.** Not by
+    /// [`State`] — which is tempting, because the states are what this applet actually believes
+    /// and they say things no status word does, but it would mean the same agent wore two
+    /// different faces depending on which surface it was read on. One vocabulary, one meaning
+    /// per picture, and this end of it does not get a vote. The table below is `zj-picker`'s
+    /// `agents::glyph`, case-insensitivity included; [`classify`] reads the same word the same
+    /// way, so there is no status that can take one module's answer and the other's picture.
+    ///
+    /// ⚠️ So the *state* is not in the glyph at all — a `your turn` row and a `dormant` one are
+    /// both ☕, and what tells them apart is the word beside them and the block they sit in.
+    /// That is `zj-picker`'s bargain too: over there `idle` is one row whether it finished a
+    /// minute ago or yesterday, and the age column is what says which.
+    ///
+    /// `frame` is the animation tick, and it reaches exactly one glyph: the busy spinner. Every
+    /// other status returns the same string on every frame, which is what lets the tray repaint
+    /// on a tick and have nothing but the turning rows change.
+    pub fn glyph(&self, frame: u64) -> &'static str {
+        match self.raw_status.to_ascii_lowercase().as_str() {
+            // Someone with their hand up: the one status the whole applet exists to surface,
+            // and literally what the agent is doing — it has asked something and stopped.
+            "waiting" => "🙋",
+            // Not asleep. An idle agent has *finished* and is waiting on your next instruction,
+            // which is why it gets a cup rather than the "do not disturb" of a 💤.
+            "idle" => "☕",
+            // The one glyph that moves, because it is the one status that is *going* somewhere:
+            // a busy agent will leave it without you, and the spinner is the row saying so
+            // without you having to read the age to find out.
+            "busy" => SPINNER[(frame as usize) % SPINNER.len()],
+            // It is a shell. There was never going to be another choice.
+            "shell" => "🐚",
+            _ => UNKNOWN_GLYPH,
+        }
+    }
+
+    /// Is this the row whose glyph moves — and therefore is a tick worth a repaint?
+    ///
+    /// Asked before rendering, so it is a question about cost rather than about correctness:
+    /// getting it wrong on a word this build has never seen costs a still spinner nobody is
+    /// looking at. Which is why it is the same comparison [`Entry::glyph`] makes, and not a
+    /// bigger idea.
+    pub fn is_spinning(&self) -> bool {
+        self.raw_status.eq_ignore_ascii_case("busy")
+    }
+
     /// [[CSB-2]]'s row: `glyph · title · state age`.
     ///
     /// `host` is gone — one machine in this slice. `cwd` never renders. **Every** row carries
     /// an age, working rows included: on a working row the age is turn duration, and it is the
     /// only place a wedged session becomes visible at all.
-    pub fn label(&self) -> String {
+    pub fn label(&self, frame: u64) -> String {
         format!(
             "{}  {:<width$}  {} {}",
-            self.state.glyph(),
+            self.glyph(frame),
             truncate(&self.title, NAME_WIDTH),
             self.state.label(),
             humanise(self.age_s),
@@ -135,6 +196,14 @@ impl Snapshot {
         }
     }
 
+    /// Is there a spinner in this menu to turn?
+    ///
+    /// Over every row, because the menu draws every row — there is no scrolled-to window here
+    /// for this to be wrong about.
+    pub fn any_spinning(&self) -> bool {
+        self.entries.iter().any(Entry::is_spinning)
+    }
+
     pub fn iter(&self, state: State) -> impl Iterator<Item = &Entry> {
         self.entries.iter().filter(move |e| e.state == state)
     }
@@ -149,7 +218,13 @@ impl Snapshot {
 fn classify(row: &Row, now: u64) -> State {
     let since_start = now.saturating_sub(row.started_at);
 
-    match row.raw_status.as_str() {
+    // 🔴 Lowercased because `zj-picker` lowercases — it compares every status with
+    // `eq_ignore_ascii_case`, and its table is the standard for what a status *is*. Matching
+    // exactly here instead would have let a hypothetical `Idle` be a counted row on one surface
+    // and an unrecognised one on the other, and it errs the wrong way besides: an unrecognised
+    // row is never counted, so a badge reading 0 while something waits is exactly the failure
+    // `FINISHED_AFTER_S` is generous to avoid.
+    match row.raw_status.to_ascii_lowercase().as_str() {
         // 🔴 Never ages. Asymmetric with `idle` on purpose — do not tidy the two thresholds
         // into one. A blocked session does not resolve itself by being ignored.
         "waiting" => State::NeedsInput,
@@ -175,6 +250,7 @@ pub fn snapshot(rows: &[Row], now: u64) -> Snapshot {
         .iter()
         .map(|row| Entry {
             state: classify(row, now),
+            raw_status: row.raw_status.clone(),
             // Provisional. `name_rows` overwrites this with the zellij session; Claude Code's
             // own label survives only where there is no session to use instead.
             title: row.name.clone(),
@@ -321,7 +397,7 @@ mod tests {
     /// harmless, and `Working` is the only harmless place.
     #[test]
     fn an_unknown_status_is_working_and_never_counted() {
-        for unknown in ["busy", "shell", "compacting", "", "IDLE"] {
+        for unknown in ["busy", "shell", "compacting", "", "nonsense"] {
             let s = classify(&row(unknown, 10, 900), NOW);
             assert_eq!(s, State::Working, "{unknown:?}");
             assert!(!s.is_actionable(), "{unknown:?}");
@@ -426,9 +502,9 @@ mod tests {
     fn a_row_is_named_by_its_zellij_session_not_by_claude_code_s_label() {
         let snap = snapshot(&[agent("infra", "1", "master-3c", 60)], NOW);
         assert_eq!(snap.entries[0].title, "infra");
-        assert!(snap.entries[0].label().contains("infra"));
+        assert!(snap.entries[0].label(0).contains("infra"));
         assert!(
-            !snap.entries[0].label().contains("master-3c"),
+            !snap.entries[0].label(0).contains("master-3c"),
             "the cwd basename is not an address"
         );
     }
@@ -479,6 +555,127 @@ mod tests {
             .map(|e| e.title.clone())
             .collect();
         assert_eq!(titles, vec!["projeto-ponte-55", "projeto-ponte-61"]);
+    }
+
+    /// 🔴 Case is `zj-picker`'s rule, not this module's: it compares every status with
+    /// `eq_ignore_ascii_case`, so `classify` does too. The alternative was a status that is
+    /// *recognised* on one surface and *unknown* on the other, which is two mappings again —
+    /// and the unknown side is the uncounted one, so the skew would hide a row rather than
+    /// merely mislabel it.
+    #[test]
+    fn case_never_decides_what_a_status_is() {
+        for waiting in ["waiting", "WAITING", "Waiting"] {
+            assert_eq!(
+                classify(&row(waiting, 5, 900), NOW),
+                State::NeedsInput,
+                "{waiting}"
+            );
+        }
+        for idle in ["idle", "IDLE", "Idle"] {
+            assert_eq!(
+                classify(&row(idle, 60, 900), NOW),
+                State::YourTurn,
+                "{idle}"
+            );
+        }
+        assert_eq!(
+            entry(State::Working, "BUSY").glyph(0),
+            entry(State::Working, "busy").glyph(0)
+        );
+    }
+
+    fn entry(state: State, raw_status: &str) -> Entry {
+        Entry {
+            state,
+            raw_status: raw_status.into(),
+            title: "infra".into(),
+            age_s: 60,
+            target: None,
+        }
+    }
+
+    /// 🔴 `zj-picker`'s table, verbatim — one vocabulary across both surfaces, so an agent read
+    /// in the picker and the same agent read in the tray are not two different pictures.
+    #[test]
+    fn the_glyphs_are_zj_pickers_and_nothing_is_added() {
+        assert_eq!(entry(State::NeedsInput, "waiting").glyph(0), "\u{1f64b}");
+        assert_eq!(entry(State::YourTurn, "idle").glyph(0), "\u{2615}");
+        assert_eq!(entry(State::Working, "shell").glyph(0), "\u{1f41a}");
+        assert_eq!(entry(State::Working, "compacting").glyph(0), UNKNOWN_GLYPH);
+        assert!(SPINNER.contains(&entry(State::Working, "busy").glyph(0)));
+    }
+
+    /// ⚠️ The state is **not** in the glyph. A row that finished a minute ago and one that aged
+    /// out an hour ago are both `idle` to the producer and both ☕ here; the word beside them and
+    /// the block they sit in are what tell them apart. That is the cost of one vocabulary, and
+    /// it is `zj-picker`'s bargain as much as this one's.
+    #[test]
+    fn the_state_does_not_change_the_picture() {
+        for state in [
+            State::NeedsInput,
+            State::YourTurn,
+            State::Working,
+            State::Dormant,
+        ] {
+            assert_eq!(entry(state, "idle").glyph(0), "\u{2615}", "{state:?}");
+        }
+        let fresh = snapshot(&[row("idle", 60, 900)], NOW);
+        let aged = snapshot(&[row("idle", 99_999, 99_999)], NOW);
+        assert_eq!(fresh.entries[0].state, State::YourTurn);
+        assert_eq!(aged.entries[0].state, State::Dormant);
+        assert_eq!(fresh.entries[0].glyph(0), aged.entries[0].glyph(0));
+        assert_ne!(fresh.entries[0].label(0), aged.entries[0].label(0));
+    }
+
+    /// The one glyph that moves, and the only one that may — everything else has to be a pure
+    /// function of the row, or a repaint on an animation tick would redraw the whole menu.
+    #[test]
+    fn only_the_busy_glyph_turns() {
+        let busy = entry(State::Working, "busy");
+        let cycle: Vec<&str> = (0..SPINNER.len() as u64).map(|f| busy.glyph(f)).collect();
+        let distinct: std::collections::HashSet<&&str> = cycle.iter().collect();
+        assert_eq!(distinct.len(), SPINNER.len(), "every frame is its own");
+        assert_eq!(
+            busy.glyph(0),
+            busy.glyph(SPINNER.len() as u64),
+            "the cycle closes"
+        );
+
+        for still in ["waiting", "idle", "shell", "compacting"] {
+            let e = entry(State::Working, still);
+            assert_eq!(e.glyph(0), e.glyph(7), "{still}");
+        }
+    }
+
+    /// ⚠️ The column lines up only if every glyph is the same *width*, and they are not the same
+    /// *length*: an emoji is one char and two columns, a braille cell is one of each. The
+    /// spinner's trailing space is the whole of what closes that gap — this is the test that
+    /// notices when someone tidies it away.
+    #[test]
+    fn a_spinner_frame_carries_the_column_an_emoji_gets_for_free() {
+        for frame in SPINNER {
+            assert!(frame.ends_with(' '), "{frame:?}");
+            assert_eq!(frame.chars().count(), 2, "{frame:?}");
+        }
+        for status in ["waiting", "idle", "shell", "compacting"] {
+            let emoji = entry(State::Working, status).glyph(0);
+            assert_eq!(emoji.chars().count(), 1, "{emoji:?} pads itself");
+        }
+    }
+
+    /// What the tray asks before deciding a tick is worth a repaint. A shell and an unknown are
+    /// `Working` too, and neither of them moves.
+    #[test]
+    fn only_a_busy_row_is_a_reason_to_repaint() {
+        let still = [
+            row("idle", 60, 900),
+            row("shell", 60, 900),
+            row("waiting", 60, 900),
+            row("compacting", 60, 900),
+            row("idle", 99_999, 99_999),
+        ];
+        assert!(!snapshot(&still, NOW).any_spinning());
+        assert!(snapshot(&[row("busy", 60, 900)], NOW).any_spinning());
     }
 
     #[test]
