@@ -1,0 +1,17 @@
+[package]
+name = "claude-tray"
+version = "0.1.0"
+edition = "2024"
+description = "A tray applet showing which Claude Code sessions are waiting on you"
+license = "MIT"
+repository = "https://github.com/lorenzolfm/claude-tray"
+
+[dependencies]
+# `blocking` is additive, not a replacement: it layers a sync facade over the
+# async tray. Dropping the default `tokio` feature does not compile — zbus
+# falls through to an `async_io` module that is not built.
+ksni = { version = "0.3", features = ["blocking"] }
+ab_glyph = "0.2"
+
+[profile.release]
+strip = true
