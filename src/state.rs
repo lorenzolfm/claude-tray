@@ -26,12 +26,27 @@ const NEWBORN_S: u64 = 30;
 /// box happens to be monospace — a system setting, not a guarantee.
 const NAME_WIDTH: usize = 28;
 
-/// One turn of the busy spinner, a frame per animation tick — `zj-picker`'s cycle, copied
-/// rather than reinvented so the two surfaces these agents are read on spin alike.
+/// One turn of the busy spinner, a frame per animation tick.
 ///
 /// Braille rather than the ASCII `|/-\`: every frame here is **one column wide**, so the glyph
 /// column keeps its width as the spinner turns rather than shoving the name column back and
 /// forth ten times a second for the whole time an agent is busy.
+///
+/// 🔴 **These are not `zj-picker`'s frames — the one place this end's picture deliberately
+/// departs from it.** Over there the cycle is `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, three dots lit per frame, which is
+/// legible in a terminal and is not legible here: a menu row is drawn in the GTK theme's own
+/// foreground, and three dots of it read as grey lint that may or may not be moving. Colour
+/// would have been the smaller change and **is not available** — Waybar draws this menu through
+/// `libdbusmenu-gtk3`, whose `set_label` runs `g_markup_escape_text` over every label, so a
+/// `<span foreground>` around the glyph arrives as literal angle brackets. The one per-row
+/// colour dbusmenu does offer is `disposition`, and it paints the *whole* label: a red name and
+/// age to fix a grey spinner. So weight is the lever that was left — seven dots lit per frame
+/// instead of three, in the same one-column cell.
+///
+/// ⚠️ What stays shared with `zj-picker` is the half that carries meaning: **which status spins,
+/// and that nothing else does**. Somebody who reads the picker reads this menu right; the frames
+/// are heavier, not different. The cycle is eight frames where the picker's is ten, so a turn
+/// takes 0.8 s at `crate::TICK` rather than a round second — a spinner has no speed anyone reads.
 ///
 /// ⚠️ Each frame carries a **trailing space** and the emoji beside it do not. That is the whole
 /// of how this column stays aligned: an emoji is two columns wide where a braille cell is one,
@@ -39,7 +54,7 @@ const NAME_WIDTH: usize = 28;
 /// measures its tag column with `unicode-width`; a dependency to measure five known strings is
 /// not the trade here, and it is why the padding lives *in the table* rather than in
 /// [`Entry::label`] — the format string below cannot tell the two widths apart.
-const SPINNER: [&str; 10] = ["⠋ ", "⠙ ", "⠹ ", "⠸ ", "⠼ ", "⠴ ", "⠦ ", "⠧ ", "⠇ ", "⠏ "];
+const SPINNER: [&str; 8] = ["⣾ ", "⣽ ", "⣻ ", "⢿ ", "⡿ ", "⣟ ", "⣯ ", "⣷ "];
 
 /// Unidentified, and deliberately not one of the four — a status this build cannot name must
 /// not be able to pass itself off as one it can. `zj-picker`'s, like the rest of the table.
@@ -113,8 +128,9 @@ impl Entry {
     /// and they say things no status word does, but it would mean the same agent wore two
     /// different faces depending on which surface it was read on. One vocabulary, one meaning
     /// per picture, and this end of it does not get a vote. The table below is `zj-picker`'s
-    /// `agents::glyph`, case-insensitivity included; [`classify`] reads the same word the same
-    /// way, so there is no status that can take one module's answer and the other's picture.
+    /// `agents::glyph`, case-insensitivity included — [`SPINNER`]'s frames are the single
+    /// exception, and they are heavier rather than other. [`classify`] reads the same word the
+    /// same way, so there is no status that can take one module's answer and the other's picture.
     ///
     /// ⚠️ So the *state* is not in the glyph at all — a `your turn` row and a `dormant` one are
     /// both ☕, and what tells them apart is the word beside them and the block they sit in.
@@ -594,8 +610,10 @@ mod tests {
         }
     }
 
-    /// 🔴 `zj-picker`'s table, verbatim — one vocabulary across both surfaces, so an agent read
-    /// in the picker and the same agent read in the tray are not two different pictures.
+    /// 🔴 `zj-picker`'s table — one vocabulary across both surfaces, so an agent read in the
+    /// picker and the same agent read in the tray are not two different pictures. The busy row
+    /// is checked against [`SPINNER`] rather than a literal: its frames are this end's own, for
+    /// the reason on that constant, and what has to hold is that `busy` is the status that spins.
     #[test]
     fn the_glyphs_are_zj_pickers_and_nothing_is_added() {
         assert_eq!(entry(State::NeedsInput, "waiting").glyph(0), "\u{1f64b}");

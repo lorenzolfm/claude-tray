@@ -49,7 +49,7 @@ same session.
 | `idle`, under an hour in state | | ☕ **your turn** | ✅ |
 | `idle`, an hour or more | | ☕ idle | — |
 | `idle`, under 30 s since the session started | | ☕ idle | — |
-| `busy` | | ⠋ working | — |
+| `busy` | | ⣾ working | — |
 | `shell` | | 🐚 working | — |
 | anything else | | 🛸 working | — |
 
@@ -57,6 +57,15 @@ same session.
 verbatim, case-insensitivity included, with nothing added and nothing dropped. The same agent
 read in the picker and read here has to be the same picture; a vocabulary that forked per
 surface would be worse than no vocabulary.
+
+⚠️ One exception, and it is about ink rather than about meaning: the busy cycle here is
+`⣾⣽⣻⢿⡿⣟⣯⣷` where the picker's is `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`. Seven dots lit per frame instead of three,
+because a menu row is drawn in the GTK theme's foreground and three dots of it read as grey lint
+that may or may not be turning. Colour was the smaller fix and is not on offer: Waybar draws this
+menu through `libdbusmenu-gtk3`, which `g_markup_escape_text`s every label, so per-glyph markup
+arrives as literal angle brackets — and the one colour dbusmenu does expose, `disposition`, paints
+the whole row. *Which* status spins is still the picker's call; only the weight of the frames is
+this end's.
 
 So the glyph carries the producer's word and *only* that. Everything this program decides on top
 of it — counted or not, *your turn* or aged out — is in the word beside the glyph and the block

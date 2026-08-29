@@ -17,9 +17,11 @@
 //! One click down, the menu draws each session with `zj-picker`'s glyph for its status —
 //! 🙋 `waiting`, ☕ `idle`, 🐚 `shell`, 🛸 anything else, and a braille spinner that actually
 //! turns for `busy`. 🔴 **That table is `zj-picker`'s and this end does not get a vote**: the
-//! same agent read on two surfaces has to be the same picture. What this applet believes *on
-//! top* of the status — counted or not, your turn or aged out — is in the word beside the glyph
-//! and the block the row sits in. See [`state::Entry::glyph`].
+//! same agent read on two surfaces has to be the same picture. Only the spinner's *frames* are
+//! this end's own — heavier ones, because a menu row is not a terminal line and the picker's
+//! three-dot cells vanish into the theme foreground; see `state::SPINNER`. What this applet
+//! believes *on top* of the status — counted or not, your turn or aged out — is in the word
+//! beside the glyph and the block the row sits in. See [`state::Entry::glyph`].
 //!
 //! # Shape
 //!
@@ -50,7 +52,7 @@ use std::time::Duration;
 
 /// The animation tick — ten a second, which is what the busy spinner needs to read as motion
 /// rather than as a glyph that keeps changing its mind. `zj-picker`'s rate, so the two spin at
-/// the same speed as well as with the same frames.
+/// the same speed even where `state::SPINNER` gives this end heavier frames to spin.
 ///
 /// ⚠️ This is **not** the poll interval, and the two were the same number until the spinner
 /// arrived. See [`TICKS_PER_POLL`]: speeding this up without that divisor would quietly have
