@@ -82,22 +82,25 @@ pub struct Target {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub state: State,
-    pub name: String,
+    /// What this row calls the agent — its **zellij session name**, which is the string
+    /// Lorenzo navigates by. Filled in by `name_rows`, because a session name can only be
+    /// judged sufficient against the other rows in the same menu.
+    pub title: String,
     pub age_s: u64,
     pub target: Option<Target>,
 }
 
 impl Entry {
-    /// [[CSB-2]]'s row: `glyph · name · state age`.
+    /// [[CSB-2]]'s row: `glyph · title · state age`.
     ///
-    /// `host` is gone — one machine in this slice. `cwd` and `version` never render. **Every**
-    /// row carries an age, working rows included: on a working row the age is turn duration,
-    /// and it is the only place a wedged session becomes visible at all.
+    /// `host` is gone — one machine in this slice. `cwd` never renders. **Every** row carries
+    /// an age, working rows included: on a working row the age is turn duration, and it is the
+    /// only place a wedged session becomes visible at all.
     pub fn label(&self) -> String {
         format!(
             "{}  {:<width$}  {} {}",
             self.state.glyph(),
-            truncate(&self.name, NAME_WIDTH),
+            truncate(&self.title, NAME_WIDTH),
             self.state.label(),
             humanise(self.age_s),
             width = NAME_WIDTH,
@@ -172,7 +175,9 @@ pub fn snapshot(rows: &[Row], now: u64) -> Snapshot {
         .iter()
         .map(|row| Entry {
             state: classify(row, now),
-            name: row.name.clone(),
+            // Provisional. `name_rows` overwrites this with the zellij session; Claude Code's
+            // own label survives only where there is no session to use instead.
+            title: row.name.clone(),
             age_s: row.transition_age_s,
             target: (row.session != "-" && row.pane != "-").then(|| Target {
                 session: row.session.clone(),
@@ -182,6 +187,7 @@ pub fn snapshot(rows: &[Row], now: u64) -> Snapshot {
         .collect();
 
     entries.sort_by(|a, b| a.state.cmp(&b.state).then(b.age_s.cmp(&a.age_s)));
+    name_rows(&mut entries);
 
     let badge = entries.iter().filter(|e| e.state.is_actionable()).count();
     let blocked = entries.iter().any(|e| e.state == State::NeedsInput);
@@ -190,6 +196,46 @@ pub fn snapshot(rows: &[Row], now: u64) -> Snapshot {
         entries,
         badge,
         blocked,
+    }
+}
+
+/// Name every row by its **zellij session**, and spell out the pane only when that name has
+/// stopped picking one row out of the menu.
+///
+/// 🔴 [[CSB-15]]. Rows used to be named by `Row::name` — Claude Code's own label, which is
+/// the cwd basename plus a two-character suffix. For `…/infra.git/master` that label is
+/// `master-3c`, a string that appears nowhere in how the session is reached: the zellij session
+/// is `infra`. The two were conflated as "the session name"; they are different things, and
+/// only one of them is an address.
+///
+/// The rule is `zj-picker`'s, deliberately copied rather than reinvented — it is the surface
+/// Lorenzo asked this one to resemble. Two parts of it are load-bearing:
+///
+/// - **Ambiguity is judged over the rows that render.** Nothing is hidden from this menu, so
+///   that is every entry; the suffix therefore appears exactly when the bare name would leave
+///   two rows looking identical.
+/// - **When a session is shared, *every* one of its rows is suffixed.** "The first one is bare"
+///   is not a rule anyone could read off the menu.
+///
+/// An agent outside zellij has no session to be named by, keeps Claude Code's label as the only
+/// identifier it has, and is never suffixed — `-:-` would be worse than the name it replaced.
+fn name_rows(entries: &mut [Entry]) {
+    for i in 0..entries.len() {
+        let Some(target) = entries[i].target.clone() else {
+            continue;
+        };
+        let shared = entries.iter().enumerate().any(|(j, other)| {
+            j != i
+                && other
+                    .target
+                    .as_ref()
+                    .is_some_and(|o| o.session == target.session)
+        });
+        entries[i].title = if shared {
+            format!("{}:{}", target.session, target.pane)
+        } else {
+            target.session
+        };
     }
 }
 
@@ -204,8 +250,9 @@ fn humanise(secs: u64) -> String {
     }
 }
 
-/// Middle-truncate, because 🔴 **the suffix has to survive**: names are cwd basenames, so
-/// `projeto-ponte-55` and `projeto-ponte-61` differ only at the end.
+/// Middle-truncate, because 🔴 **the tail has to survive**: a `:pane` suffix is the whole of
+/// what tells two rows in one session apart, and the fallback names for agents outside zellij
+/// are cwd basenames, where `projeto-ponte-55` and `projeto-ponte-61` differ only at the end.
 fn truncate(name: &str, width: usize) -> String {
     let chars: Vec<char> = name.chars().collect();
     if chars.len() <= width {
@@ -362,6 +409,76 @@ mod tests {
         r.session = "-".into();
         r.pane = "-".into();
         assert_eq!(snapshot(&[r], NOW).entries[0].target, None);
+    }
+
+    fn agent(session: &str, pane: &str, name: &str, age: u64) -> Row {
+        let mut r = row("idle", age, 900);
+        r.session = session.into();
+        r.pane = pane.into();
+        r.name = name.into();
+        r
+    }
+
+    /// 🔴 [[CSB-15]], as a regression test. `master-3c` is Claude Code's own label for an
+    /// agent in `…/infra.git/master`; the session it lives in is `infra`. Naming the row by the
+    /// label put a string on screen that Lorenzo has no way to connect to a session.
+    #[test]
+    fn a_row_is_named_by_its_zellij_session_not_by_claude_code_s_label() {
+        let snap = snapshot(&[agent("infra", "1", "master-3c", 60)], NOW);
+        assert_eq!(snap.entries[0].title, "infra");
+        assert!(snap.entries[0].label().contains("infra"));
+        assert!(
+            !snap.entries[0].label().contains("master-3c"),
+            "the cwd basename is not an address"
+        );
+    }
+
+    /// `zj-picker`'s rule, copied: the pane is spelled out exactly when the bare session name
+    /// has stopped picking one row out — and then on **both** rows, because "the first one is
+    /// bare" is not a rule anyone could read off the menu.
+    #[test]
+    fn two_agents_in_one_session_both_spell_out_the_pane() {
+        let rows = [
+            agent("infra", "1", "master-3c", 60),
+            agent("infra", "2", "hotfix-7a", 30),
+            agent("nixos", "0", "nixos-69", 20),
+        ];
+        let titles: Vec<String> = snapshot(&rows, NOW)
+            .entries
+            .iter()
+            .map(|e| e.title.clone())
+            .collect();
+        assert_eq!(titles, vec!["infra:1", "infra:2", "nixos"]);
+    }
+
+    /// The suffix is judged against every row in the menu, not against rows of the same state —
+    /// a dormant row and a waiting one that share a session are still two rows reading `infra`.
+    #[test]
+    fn sharing_is_judged_across_the_whole_menu_not_within_one_state() {
+        let mut waiting = agent("infra", "1", "master-3c", 10);
+        waiting.raw_status = "waiting".into();
+        let rows = [waiting, agent("infra", "2", "hotfix-7a", 99_999)];
+        let snap = snapshot(&rows, NOW);
+        assert_eq!(snap.entries[0].state, State::NeedsInput);
+        assert_eq!(snap.entries[1].state, State::Dormant);
+        assert_eq!(snap.entries[0].title, "infra:1");
+        assert_eq!(snap.entries[1].title, "infra:2");
+    }
+
+    /// Nowhere to jump means nothing to be named by, so Claude Code's label is all there is —
+    /// and two such rows are never suffixed, because `-:-` says less than the label does.
+    #[test]
+    fn an_agent_outside_zellij_keeps_claude_code_s_label() {
+        let rows = [
+            agent("-", "-", "projeto-ponte-55", 60),
+            agent("-", "-", "projeto-ponte-61", 30),
+        ];
+        let titles: Vec<String> = snapshot(&rows, NOW)
+            .entries
+            .iter()
+            .map(|e| e.title.clone())
+            .collect();
+        assert_eq!(titles, vec!["projeto-ponte-55", "projeto-ponte-61"]);
     }
 
     #[test]

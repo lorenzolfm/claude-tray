@@ -26,9 +26,16 @@ const FIELDS: usize = 9;
 
 /// One line of `claude-agents` output, still uninterpreted.
 ///
-/// Only the fields this applet reads are kept. `pid`, `session_id`, `version` and `cwd` are
-/// parsed for the arity check and then dropped — [[CSB-2]] ruled that `cwd` never renders,
-/// because the session name already *is* its basename.
+/// Only the fields this applet reads are kept. `pid`, `session_id` and `cwd` are parsed for the
+/// arity check and then dropped.
+///
+/// 🔴 **`name` and `session` are two different things, and calling both of them "the session
+/// name" is what [[CSB-15]] cost.** `name` is Claude Code's own label — the cwd basename plus a
+/// two-character suffix, so `…/infra.git/master` becomes `master-3c`. `session` is the zellij
+/// session that agent is sitting in, `infra`. Only the second is an address, and the first can
+/// be unrelated to it. [[CSB-2]] justified dropping `cwd` on the grounds that "the session name
+/// already *is* its basename", which is true of `name` and false of `session`; rows are named by
+/// `session` now, and `name` survives only as the fallback for an agent outside zellij.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     /// Verbatim from the producer. `busy | idle | waiting | shell`, or anything a future
@@ -44,7 +51,10 @@ pub struct Row {
     pub session: String,
     /// `$ZELLIJ_PANE_ID`, or `-`. This is exactly what `zellij action focus-pane-id` takes.
     pub pane: String,
-    /// The label a human reads. Derived from the cwd basename by Claude Code itself.
+    /// Claude Code's own label for the session, derived by it from the cwd basename.
+    ///
+    /// ⚠️ **Not what a row is named by** — see the note above, and `state::name_rows`.
+    /// It renders only when `session` is `-`, where it is the sole identifier left.
     pub name: String,
     /// Wall-clock unix seconds at session start.
     ///
