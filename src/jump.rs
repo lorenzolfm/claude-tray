@@ -39,10 +39,27 @@
 //! click that only tried `switch-session` would have gone on opening the duplicate window he
 //! complained about.
 //!
-//! So the move is **checked** — the client's live session is read back — and when zellij moved
-//! nothing, the terminal is **woken** with a keystroke it will actually register and the switch is
-//! asked for once more. Only if that fails too does a terminal get opened. **Every row still
-//! lands**, which was Lorenzo's whole reason for choosing raise-or-attach in CSB-16.
+//! So the terminal is **woken** with a keystroke it will actually register, and only then asked to
+//! switch. The move is still **checked** — the client's live session is read back — and only if it
+//! never arrives does a terminal get opened. **Every row still lands**, which was Lorenzo's whole
+//! reason for choosing raise-or-attach in CSB-16.
+//!
+//! # Why the wake is unconditional
+//!
+//! 🔴 **[[CSB-19]]: waking only when zellij refused cost a second on every click**, because
+//! finding out that it refused *is* a timeout. CSB-17 tried the switch first and woke only on
+//! refusal, which reads as thrifty and is not: on the common path that first switch **cannot**
+//! succeed — he arrives at sessions by switching, so the client has typed nothing there — so it
+//! burned the whole `SWITCH_DEADLINE` before the wake even started. That was the ~1.2 s he felt.
+//!
+//! ⚠️ **There is nothing to learn by asking first.** Measured on the box: a switch that is going
+//! to succeed is visible in **39–65 ms** over 20 trials, and one that is going to be ignored is
+//! *never* visible — still unmoved 3.2 s on. The speculative call buys no information the wake
+//! does not make moot.
+//!
+//! Waking costs ~130 ms unconditionally, and the `Ctrl e` pair is invisible in his config. 🔴
+//! **His call**, taken again with the numbers in hand: ~1.2 s → ~0.2 s, for a keystroke nobody
+//! sees on the clicks that would have worked anyway.
 
 use crate::state::Target;
 use std::collections::HashMap;
@@ -59,10 +76,16 @@ const TERMINAL: &str = "ghostty";
 /// under it; the bound is only here so a `/proc` that lies cannot spin us forever.
 const MAX_ANCESTRY: usize = 32;
 
-/// How long to wait for a switched client to turn up in its new session before deciding zellij
-/// ignored the request. A switch that is going to happen shows up in well under a tenth of this;
-/// the slack is for a loaded box, and it is only ever paid on a click that is about to need the
-/// wake anyway.
+/// How long to wait for a switched client to turn up in its new session before giving up and
+/// opening a terminal instead.
+///
+/// **A switch that is going to happen lands in 39–65 ms** — 20 trials against a woken lab client,
+/// [[CSB-19]] — so this is some fifteen times the worst case observed.
+///
+/// ⚠️ **Keep the slack.** Under CSB-17 a premature expiry here was harmless, because the wake and
+/// a second attempt sat behind it. Since CSB-19 the wake comes *first* and there is nothing
+/// behind this: expiring means `retarget` gives up and `focus` opens the duplicate window CSB-16
+/// and CSB-17 exist to prevent. It is never paid on a click that works, so the generosity is free.
 const SWITCH_DEADLINE: Duration = Duration::from_millis(1000);
 
 /// How often to re-read the client's live session while waiting. Each poll is one `ss` run.
@@ -192,14 +215,13 @@ fn pane_outcome(ok: bool, stdout: &str, stderr: &str) -> Result<(), String> {
     Err(why.to_string())
 }
 
-/// Move a terminal to another session, waking its client if zellij will not otherwise listen.
+/// Move a terminal to another session, waking its client first so that zellij will listen.
+///
+/// 🔴 **The wake is unconditional** — see the module note. Asking first only bought a timeout.
 ///
 /// `Ok(false)` means even the woken client did not move, or the window went away underneath us.
 /// Either way the caller's answer is the same: open a terminal.
 fn retarget(from: &Terminal, target: &Target) -> Result<bool, String> {
-    if switch(from, target)? {
-        return Ok(true);
-    }
     // ⚠️ Raise before waking. The wake is a real key event, and the surest way for it to land in
     // this terminal is for this terminal to be the focused window — which it is about to become
     // anyway. `Ok(false)` here is the window having closed between the scan and now.
