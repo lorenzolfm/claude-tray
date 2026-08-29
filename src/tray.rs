@@ -67,14 +67,26 @@ fn now() -> u64 {
 }
 
 /// One menu row. Clicking it puts him in front of that session — see [`crate::jump`], which
-/// raises the window showing it or opens one that does. A row with nowhere to go is inert but
-/// still readable, and a dormant row is `enabled: false` — which reads as *dimmed*, i.e.
-/// secondary, rather than as broken.
+/// switches the terminal he already has to that session, or opens one when there is none.
+///
+/// 🔴 **A row is enabled exactly when it has somewhere to send him**, and dormant rows have
+/// somewhere just like the rest. [[CSB-11]] made `enabled: false` the way to *look* secondary,
+/// and [[CSB-12]] hung it on `Dormant` — reasonable when the click was a no-op, and wrong the
+/// moment [[CSB-17]] made a click actually land somewhere. It meant the rows he is most likely
+/// to have **forgotten about** were the only ones he could not jump to, which inverts
+/// [[CSB-3]]'s whole reason for listing them: ageing out means *stops nagging*, not *is lost*.
+/// Verified against the real menu — GTK reports a dormant row `sensitive=false`, so the grey was
+/// not merely cosmetic and the click genuinely could not be made.
+///
+/// *Uncounted* is already said twice over, by the `·` glyph and by the row's absence from the
+/// badge. It does not need saying a third time in a flag that also blocks the jump. So the only
+/// dimmed rows left are agents outside zellij, which have no address to send him to — where
+/// dimmed means **inert**, which is what it should have meant all along.
 fn row(entry: &Entry) -> MenuItem<ClaudeTray> {
     let target = entry.target.clone();
     StandardItem {
         label: entry.label(),
-        enabled: entry.state != State::Dormant,
+        enabled: target.is_some(),
         activate: Box::new(move |_: &mut ClaudeTray| {
             if let Some(t) = &target
                 && let Err(e) = jump::focus(t)
@@ -226,4 +238,60 @@ fn quit() -> MenuItem<ClaudeTray> {
         ..Default::default()
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Target;
+
+    fn entry(state: State, target: Option<Target>) -> Entry {
+        Entry {
+            state,
+            title: "infra".into(),
+            age_s: 60,
+            target,
+        }
+    }
+
+    fn somewhere() -> Option<Target> {
+        Some(Target {
+            session: "infra".into(),
+            pane: "0".into(),
+        })
+    }
+
+    fn enabled(item: &MenuItem<ClaudeTray>) -> bool {
+        match item {
+            MenuItem::Standard(s) => s.enabled,
+            _ => panic!("not a standard item"),
+        }
+    }
+
+    /// 🔴 [[CSB-18]]. A dormant row is the one he has most likely forgotten, so it is the last
+    /// row that should refuse to take him there. GTK marks `enabled: false` rows genuinely
+    /// insensitive, so this flag is the jump, not a shade of grey.
+    #[test]
+    fn a_dormant_row_can_still_be_jumped_to() {
+        assert!(enabled(&row(&entry(State::Dormant, somewhere()))));
+    }
+
+    #[test]
+    fn every_state_with_an_address_is_reachable() {
+        for state in [
+            State::NeedsInput,
+            State::YourTurn,
+            State::Working,
+            State::Dormant,
+        ] {
+            assert!(enabled(&row(&entry(state, somewhere()))), "{state:?}");
+        }
+    }
+
+    /// ⚠️ The one thing dimming still means: an agent outside zellij has no address, so the row
+    /// is readable and inert rather than a click that quietly does nothing.
+    #[test]
+    fn a_row_with_nowhere_to_go_is_inert() {
+        assert!(!enabled(&row(&entry(State::Working, None))));
+    }
 }
