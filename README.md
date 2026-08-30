@@ -36,6 +36,21 @@ Re-deriving any of it here would create a second source that can disagree with t
 
 `claude-ps` is looked up on `PATH`, not pinned, so it can be upgraded underneath the applet.
 
+## The token count on each row
+
+`claude-ps` reports how much context each agent was carrying at its last assistant turn, and
+each menu row carries it as a trailing `188k`.
+
+⚠️ **Tokens, never a percentage.** The context window *size* is never written to disk — Claude
+Code computes it and hands it to a status line at render time — so a denominator here would have
+to come from a model-name table that goes confidently wrong the day a new model ships. That is
+the same failure this applet avoids by passing `status` through, and worse: an unrecognised
+status renders as itself, while a wrong denominator renders as a number that looks right.
+
+A row whose count is missing simply **omits** it. The producer's join for this one key is a path
+derived from `cwd` rather than a proof, so "not known" is ordinary — and a `0` there would be a
+lie the eye cannot catch.
+
 ## What it decides
 
 `claude-ps` passes `status` through verbatim and tells consumers not to match it against a

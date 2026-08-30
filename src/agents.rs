@@ -33,6 +33,18 @@ pub struct Zellij {
     pub pane: String,
 }
 
+/// How loaded a session's context is, at its last completed assistant turn.
+///
+/// ⚠️ Tokens only. The producer emits no percentage because the window size is not written to
+/// disk anywhere, and this applet does not invent one: a model-name table would render a wrong
+/// denominator as a number that looks right. `as_of` is on the wire and deliberately not read
+/// here — the row already shows how long the agent has sat in its status, which is the same
+/// staleness by a route the user can already see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct Context {
+    pub tokens: u64,
+}
+
 /// One agent out of `claude-ps`, still uninterpreted.
 ///
 /// Only the keys this applet reads are kept; the rest of the object is ignored. ⚠️ That is
@@ -64,6 +76,10 @@ pub struct Row {
     /// row still counts and still renders; it simply has nowhere to jump to.
     #[serde(default)]
     pub zellij: Option<Zellij>,
+    /// `None` when the producer could not find the transcript. That join is a derivation rather
+    /// than a proof, so a missing count is ordinary and costs this row its number, nothing more.
+    #[serde(default)]
+    pub context: Option<Context>,
     /// Claude Code's own label for the session, derived by it from the cwd basename.
     ///
     /// ⚠️ **Not what a row is named by** — see the note above, and `state::name_rows`.
@@ -138,6 +154,7 @@ mod tests {
         "status": "idle",
         "age": 14493,
         "zellij": { "session": "bipa", "pane": "0" },
+        "context": { "tokens": 187953, "as_of": 1788052221 },
         "name": "projeto-ponte-55",
         "pid": 3134390,
         "session_id": "some-uuid",
@@ -157,6 +174,7 @@ mod tests {
                     session: "bipa".into(),
                     pane: "0".into()
                 }),
+                context: Some(Context { tokens: 187953 }),
                 name: "projeto-ponte-55".into(),
                 started_at: 1787965062,
             }]
@@ -198,6 +216,18 @@ mod tests {
     fn an_agent_outside_zellij_still_parses() {
         let outside = OUT.replace(r#"{ "session": "bipa", "pane": "0" }"#, "null");
         assert_eq!(parse(&outside).unwrap()[0].zellij, None);
+    }
+
+    /// A producer that could not find the transcript costs the row its number, not the row.
+    #[test]
+    fn a_null_context_is_not_a_failure() {
+        let nulled = OUT.replace(
+            r#""context": { "tokens": 187953, "as_of": 1788052221 }"#,
+            r#""context": null"#,
+        );
+        let rows = parse(&nulled).unwrap();
+        assert_eq!(rows[0].context, None);
+        assert_eq!(rows[0].raw_status, "idle");
     }
 
     /// A `null` status is a schema move, not a reason to drop a live agent off the list.

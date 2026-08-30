@@ -117,6 +117,10 @@ pub struct Entry {
     /// judged sufficient against the other rows in the same menu.
     pub title: String,
     pub age_s: u64,
+    /// Tokens in context at the last assistant turn, or `None` when the producer had no
+    /// transcript to read. Rendered as a trailing `188k`; absent rows simply omit it, because
+    /// a `-` in that column would read as "zero tokens" rather than "not known".
+    pub context_tokens: Option<u64>,
     pub target: Option<Target>,
 }
 
@@ -175,14 +179,37 @@ impl Entry {
     /// only place a wedged session becomes visible at all.
     pub fn label(&self, frame: u64) -> String {
         format!(
-            "{}  {:<width$}  {} {}",
+            "{}  {:<width$}  {} {}{}",
             self.glyph(frame),
             truncate(&self.title, NAME_WIDTH),
             self.state.label(),
             humanise(self.age_s),
+            // Trailing rather than its own column: it is the one field that can be absent, and
+            // a column that is sometimes blank costs every other row its alignment.
+            match self.context_tokens {
+                Some(tokens) => format!("   {}", humanise_tokens(tokens)),
+                None => String::new(),
+            },
             width = NAME_WIDTH,
         )
     }
+}
+
+/// A token count at a glance: `950`, `188k`, `1.2M`.
+///
+/// Three significant figures at most, because this is a menu row and the difference between
+/// 187,953 and 188,000 is not a difference anyone acts on.
+fn humanise_tokens(tokens: u64) -> String {
+    if tokens < 1_000 {
+        return format!("{tokens}");
+    }
+    // Rounded to tenths of a million first, so a count that rounds *up* to a million reads as
+    // `1.0M` rather than as `1000k`.
+    let tenths_of_m = (tokens + 50_000) / 100_000;
+    if tenths_of_m >= 10 {
+        return format!("{}.{}M", tenths_of_m / 10, tenths_of_m % 10);
+    }
+    format!("{}k", (tokens + 500) / 1_000)
 }
 
 /// Everything the tray needs for one repaint, derived once so the badge and the list cannot
@@ -271,6 +298,7 @@ pub fn snapshot(rows: &[Row], now: u64) -> Snapshot {
             // own label survives only where there is no session to use instead.
             title: row.name.clone(),
             age_s: row.transition_age_s,
+            context_tokens: row.context.map(|c| c.tokens),
             // One `map`, because the producer nests the pair: there is no state where a
             // session is known and its pane is not, so there is nothing left to agree on here.
             target: row.zellij.as_ref().map(|z| Target {
@@ -363,7 +391,7 @@ fn truncate(name: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::Zellij;
+    use crate::agents::{Context, Zellij};
 
     const NOW: u64 = 1_800_000_000;
 
@@ -376,6 +404,7 @@ mod tests {
                 pane: "0".into(),
             }),
             name: "n".into(),
+            context: Some(Context { tokens: 187_953 }),
             started_at: NOW - since_start,
         }
     }
@@ -500,6 +529,33 @@ mod tests {
         assert!(snapshot(&[row("waiting", 60, 900), row("idle", 60, 900)], NOW).blocked);
     }
 
+    /// ⚠️ Absent, not `-` or `0`. A blank would read as "no tokens" where the truth is
+    /// "the producer could not tell", and a zero would be a lie the eye cannot catch.
+    #[test]
+    fn a_row_without_a_token_count_just_omits_it() {
+        let mut r = row("idle", 10, 900);
+        r.context = None;
+        let label = snapshot(&[r], NOW).entries[0].label(0);
+        assert!(label.ends_with("your turn <1m"), "got {label:?}");
+        assert!(!label.contains('k'));
+    }
+
+    #[test]
+    fn a_token_count_trails_the_age() {
+        let label = snapshot(&[row("idle", 10, 900)], NOW).entries[0].label(0);
+        assert!(label.ends_with("your turn <1m   188k"), "got {label:?}");
+    }
+
+    #[test]
+    fn token_counts_round_to_three_figures() {
+        assert_eq!(humanise_tokens(950), "950");
+        // Rounded, not truncated: 187,953 is nearer 188k than 187k.
+        assert_eq!(humanise_tokens(187_953), "188k");
+        assert_eq!(humanise_tokens(1_200_000), "1.2M");
+        // ...and a count that rounds up to a million does not become `1000k`.
+        assert_eq!(humanise_tokens(999_999), "1.0M");
+    }
+
     #[test]
     fn an_agent_outside_zellij_has_nowhere_to_jump() {
         let mut r = row("waiting", 10, 900);
@@ -612,6 +668,7 @@ mod tests {
             raw_status: raw_status.into(),
             title: "infra".into(),
             age_s: 60,
+            context_tokens: Some(187_953),
             target: None,
         }
     }

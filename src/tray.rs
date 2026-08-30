@@ -340,6 +340,7 @@ mod tests {
             raw_status: "idle".into(),
             title: "infra".into(),
             age_s: 60,
+            context_tokens: Some(187_953),
             target,
         }
     }
