@@ -1,7 +1,7 @@
 //! The StatusNotifierItem itself: what Waybar reads, and what the menu says.
 
-use crate::icon::{BLOCKED, COUNT, FAULT, Renderer};
-use crate::state::{Entry, Snapshot, State, snapshot};
+use crate::icon::{BLOCKED, FAULT, Renderer};
+use crate::state::{Entry, Snapshot, snapshot};
 use crate::{agents, jump};
 use ksni::menu::StandardItem;
 use ksni::{Icon, MenuItem, Status};
@@ -110,27 +110,30 @@ impl ClaudeTray {
     }
 
     /// What goes beside the mark, and in what colour. 🔴 **The mark itself is never part of
-    /// this** — it is identity, and it stays [`crate::mark::CLAUDE`] in every state. Three things can
-    /// appear here and each has exactly one meaning:
+    /// this** — it is identity, and it stays [`crate::mark::CLAUDE`] in every state. Three things
+    /// can appear here and each has exactly one meaning:
     ///
     /// - nothing, in the calm case — the mark alone;
-    /// - the count in [`COUNT`], the bar's own foreground, when turns have merely finished;
-    /// - the count in [`BLOCKED`] amber when at least one session is *stuck on him*, which is
-    ///   what the retired `◈` glyph used to say;
+    /// - the count in [`BLOCKED`] amber, which is what the retired `◈` glyph used to say:
+    ///   somebody is stuck on him;
     /// - `⊘` in [`FAULT`] red — not "you have work" but *the applet cannot see*. `⊘` was
     ///   originally *unreachable*, which cannot happen on one box; a producer that is missing
     ///   or exiting non-zero is the real failure, and it inherits the shape.
+    ///
+    /// ⚠️ There used to be a fourth: the count in the bar's own foreground, for turns that had
+    /// *merely finished*. It went when `idle` stopped being counted — every agent in this number
+    /// is blocked now, so a second colour would have been a distinction with one value.
     fn badge(&self) -> (String, [u8; 3]) {
         match &self.view {
             View::Broken(_) => ("\u{2298}".to_string(), FAULT),
-            View::Agents(s) if s.blocked => (s.badge_text(), BLOCKED),
-            View::Agents(s) => (s.badge_text(), COUNT),
+            View::Agents(s) => (s.badge_text(), BLOCKED),
         }
     }
 }
 
-/// Unix seconds. A clock that cannot be read is treated as the epoch, which makes every session
-/// look ancient — dormant, uncounted, still listed. Wrong, but wrong in the quiet direction.
+/// Unix seconds. A clock that cannot be read is treated as the epoch, which only makes the ages
+/// stop advancing between polls — `Snapshot::since` saturates, so a row reads the age the
+/// producer gave it rather than a wrong one. Wrong, but wrong in the quiet direction.
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -152,23 +155,22 @@ fn now_ms() -> u64 {
 /// One menu row. Clicking it puts him in front of that session — see [`crate::jump`], which
 /// switches the terminal he already has to that session, or opens one when there is none.
 ///
-/// 🔴 **A row is enabled exactly when it has somewhere to send him**, and dormant rows have
-/// somewhere just like the rest. [[CSB-11]] made `enabled: false` the way to *look* secondary,
-/// and [[CSB-12]] hung it on `Dormant` — reasonable when the click was a no-op, and wrong the
-/// moment [[CSB-17]] made a click actually land somewhere. It meant the rows he is most likely
-/// to have **forgotten about** were the only ones he could not jump to, which inverts
-/// [[CSB-3]]'s whole reason for listing them: ageing out means *stops nagging*, not *is lost*.
-/// Verified against the real menu — GTK reports a dormant row `sensitive=false`, so the grey was
-/// not merely cosmetic and the click genuinely could not be made.
+/// 🔴 **A row is enabled exactly when it has somewhere to send him**, whatever its state.
+/// [[CSB-11]] made `enabled: false` the way to *look* secondary, and [[CSB-12]] hung it on the
+/// aged-out rows — reasonable when the click was a no-op, and wrong the moment [[CSB-17]] made a
+/// click actually land somewhere. It meant the rows he is most likely to have **forgotten
+/// about** were the only ones he could not jump to. Verified against the real menu — GTK reports
+/// such a row `sensitive=false`, so the grey was not merely cosmetic and the click genuinely
+/// could not be made.
 ///
-/// *Uncounted* is already said twice over, by the `·` glyph and by the row's absence from the
-/// badge. It does not need saying a third time in a flag that also blocks the jump. So the only
-/// dimmed rows left are agents outside zellij, which have no address to send him to — where
-/// dimmed means **inert**, which is what it should have meant all along.
-fn row(entry: &Entry, frame: u64) -> MenuItem<ClaudeTray> {
+/// ⚠️ That state is gone now — `dormant` went with `your turn` — but the rule it taught did not:
+/// dimming is **not** a way to say *uncounted*, which the glyph and the badge already say twice
+/// over. So the only dimmed rows left are agents outside zellij, which have no address to send
+/// him to — where dimmed means **inert**, which is what it should have meant all along.
+fn row(entry: &Entry, frame: u64, since: u64) -> MenuItem<ClaudeTray> {
     let target = entry.target.clone();
     StandardItem {
-        label: entry.label(frame),
+        label: entry.label(frame, since),
         enabled: target.is_some(),
         activate: Box::new(move |_: &mut ClaudeTray| {
             if let Some(t) = &target
@@ -274,6 +276,12 @@ impl ksni::Tray for ClaudeTray {
         true
     }
 
+    /// 🔴 **One flat list, in `luneta`'s order.** The dividers that used to separate "wants
+    /// you" from "is merely running" from "has aged out" are gone with the states they
+    /// separated: the glyph and the word already say which block a row is in, and a menu whose
+    /// groups are drawn differently from the picker's list is the disagreement this whole
+    /// change was about. The only separator left is the one above `Quit`, which is not a group
+    /// boundary but the edge of the list.
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let frame = self.anim.frame();
         let snap = match &self.view {
@@ -287,32 +295,12 @@ impl ksni::Tray for ClaudeTray {
             return vec![note("no agents running"), MenuItem::Separator, quit()];
         }
 
-        let mut items: Vec<MenuItem<Self>> = Vec::new();
+        // ⚠️ Read once for the whole menu, not per row: the offset has to be the *same* number
+        // everywhere or a slow rebuild would show two rows disagreeing about what time it is.
+        let since = snap.since(now());
 
-        // Actionable first — the reason the applet is in the bar at all.
-        for state in [State::NeedsInput, State::YourTurn] {
-            items.extend(snap.iter(state).map(|e| row(e, frame)));
-        }
-
-        // Then what is merely running. A divider, because "wants you" and "is busy" are
-        // different questions and the eye should not have to read the state column to tell.
-        let working: Vec<_> = snap.iter(State::Working).map(|e| row(e, frame)).collect();
-        if !working.is_empty() {
-            if !items.is_empty() {
-                items.push(MenuItem::Separator);
-            }
-            items.extend(working);
-        }
-
-        // 🔴 And then what has aged out: **listed, dimmed, uncounted — not hidden.** An hour is
-        // only a safe threshold because crossing it means *stops nagging*, not *is lost*.
-        let dormant: Vec<_> = snap.iter(State::Dormant).map(|e| row(e, frame)).collect();
-        if !dormant.is_empty() {
-            if !items.is_empty() {
-                items.push(MenuItem::Separator);
-            }
-            items.extend(dormant);
-        }
+        let mut items: Vec<MenuItem<Self>> =
+            snap.entries.iter().map(|e| row(e, frame, since)).collect();
 
         items.push(MenuItem::Separator);
         items.push(quit());
@@ -332,7 +320,7 @@ fn quit() -> MenuItem<ClaudeTray> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::Target;
+    use crate::state::{State, Target};
 
     fn entry(state: State, target: Option<Target>) -> Entry {
         Entry {
@@ -340,7 +328,6 @@ mod tests {
             raw_status: "idle".into(),
             title: "infra".into(),
             age_s: 60,
-            context_tokens: Some(187_953),
             target,
         }
     }
@@ -359,23 +346,20 @@ mod tests {
         }
     }
 
-    /// 🔴 [[CSB-18]]. A dormant row is the one he has most likely forgotten, so it is the last
-    /// row that should refuse to take him there. GTK marks `enabled: false` rows genuinely
-    /// insensitive, so this flag is the jump, not a shade of grey.
-    #[test]
-    fn a_dormant_row_can_still_be_jumped_to() {
-        assert!(enabled(&row(&entry(State::Dormant, somewhere()), 0)));
+    fn label(item: &MenuItem<ClaudeTray>) -> String {
+        match item {
+            MenuItem::Standard(s) => s.label.clone(),
+            _ => panic!("not a standard item"),
+        }
     }
 
+    /// 🔴 [[CSB-18]]. The row he has most likely forgotten is the last one that should refuse to
+    /// take him there. GTK marks `enabled: false` rows genuinely insensitive, so this flag is
+    /// the jump, not a shade of grey.
     #[test]
     fn every_state_with_an_address_is_reachable() {
-        for state in [
-            State::NeedsInput,
-            State::YourTurn,
-            State::Working,
-            State::Dormant,
-        ] {
-            assert!(enabled(&row(&entry(state, somewhere()), 0)), "{state:?}");
+        for state in [State::Waiting, State::Idle, State::Busy, State::Other] {
+            assert!(enabled(&row(&entry(state, somewhere()), 0, 0)), "{state:?}");
         }
     }
 
@@ -383,6 +367,16 @@ mod tests {
     /// is readable and inert rather than a click that quietly does nothing.
     #[test]
     fn a_row_with_nowhere_to_go_is_inert() {
-        assert!(!enabled(&row(&entry(State::Working, None), 0)));
+        assert!(!enabled(&row(&entry(State::Busy, None), 0, 0)));
+    }
+
+    /// 🔴 The menu is rebuilt ten times a second off a frozen snapshot, so the offset has to
+    /// reach the label or the age column freezes with the list.
+    #[test]
+    fn a_rows_age_counts_on_while_the_menu_is_open() {
+        let fresh = label(&row(&entry(State::Idle, somewhere()), 0, 0));
+        let later = label(&row(&entry(State::Idle, somewhere()), 0, 120));
+        assert!(fresh.ends_with("idle 1m"), "{fresh}");
+        assert!(later.ends_with("idle 3m"), "{later}");
     }
 }

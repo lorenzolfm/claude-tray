@@ -13,9 +13,9 @@
 //! 🔴 **The pixmap used to be monochrome so that colour could live in `style.css`. That reason
 //! is gone.** [`ksni::Status::NeedsAttention`] does add a `needs-attention` CSS class, but a
 //! tray item is a `Gtk::Image`: `color` does nothing to it, and the only cue CSS can actually
-//! give is a border. So colour has to be *in the pixels* or nowhere, and the three it carries
-//! each mean exactly one thing — the mark is always [`mark::CLAUDE`], and the badge is [`COUNT`]
-//! or [`BLOCKED`] or [`FAULT`]. See `README.md`.
+//! give is a border. So colour has to be *in the pixels* or nowhere, and the ones it carries
+//! each mean exactly one thing — the mark is always [`mark::CLAUDE`], and the badge is
+//! [`BLOCKED`] or [`FAULT`]. See `README.md`.
 
 use crate::mark;
 use ab_glyph::{Font as _, FontRef, PxScale, ScaleFont, point};
@@ -25,15 +25,16 @@ use ksni::Icon;
 /// above; the mark is rasterised to it, so changing it stays crisp rather than resampled.
 pub const HEIGHT: u32 = 20;
 
-/// The count, when it is merely a count. 🔴 **Not the mark's terracotta** — that was tried and
-/// it is the dimmest thing on the bar, which is backwards: the mark is the part you already know
-/// and the number is the part you have to read. This is `#fdf6e3` from his own `style.css`, the
-/// colour every other figure in the bar is already drawn in.
-pub const COUNT: [u8; 3] = [0xFD, 0xF6, 0xE3];
-
-/// Something is *blocked*, not merely finished — the distinction the old `◈`-over-`◆` glyph
-/// pair carried, now carried by the colour of the count. Same amber as the `needs-attention`
-/// border in `style.css`, because it means the same thing: nothing is moving, look now.
+/// The count. Everything in it is *blocked on him* — the distinction the old `◈`-over-`◆` glyph
+/// pair carried. Same amber as the `needs-attention` border in `style.css`, because it means the
+/// same thing: nothing is moving, look now.
+///
+/// ⚠️ There was a second colour beside this one, `#fdf6e3`, for a count of turns that had merely
+/// *finished*. It went when `idle` stopped being counted: the number has one meaning now, so it
+/// has one colour. 🔴 If a second one is ever wanted, note what was already learnt about the
+/// first — the mark's own terracotta was tried and is the dimmest thing on the bar, which is
+/// backwards, because the mark is the part you already know and the number is the part you have
+/// to read.
 pub const BLOCKED: [u8; 3] = [0xE5, 0xC0, 0x7B];
 
 /// The producer is missing or failing. Not "you have work" — *the applet cannot see*, which is
