@@ -34,7 +34,7 @@
 //! CLI flag to name a client.
 //!
 //! ⚠️ **This is not a rare corner — it was the very first thing the live test hit.** He arrives at
-//! a session by *switching* to it with `zj-picker`, and a client that switched in has pressed no
+//! a session by *switching* to it with `luneta`, and a client that switched in has pressed no
 //! key in its new session. So on his own workflow the terminal is regularly unwakeable, and a
 //! click that only tried `switch-session` would have gone on opening the duplicate window he
 //! complained about.
@@ -60,6 +60,22 @@
 //! Waking costs ~130 ms unconditionally, and the `Ctrl e` pair is invisible in his config. 🔴
 //! **His call**, taken again with the numbers in hand: ~1.2 s → ~0.2 s, for a keystroke nobody
 //! sees on the clicks that would have worked anyway.
+//!
+//! # Why the compositor handle is found rather than inherited
+//!
+//! 🔴 **`hyprctl` needs `HYPRLAND_INSTANCE_SIGNATURE`, and this applet is started before
+//! there is one.** systemd brings the user session up at boot and Hyprland is an ordinary
+//! process inside it, so the unit's environment is fixed *before* the compositor exists and
+//! never learns the signature — an `import-environment` would have to run after the applet
+//! rather than before it. Every `hyprctl` call then failed and every click died in
+//! [`terminals`], one line into a jump, with no window ever raised.
+//!
+//! ⚠️ **And it failed quietly, which is why it took the journal to find.** `hyprctl`
+//! prints `HYPRLAND_INSTANCE_SIGNATURE not set!` **on stdout** and exits **0**: the exit code
+//! says success and the answer is prose. That is why nothing in this module reads an exit code
+//! from it — every call matches on what came back instead, and prose is not a window list.
+//! See [`hyprctl`], which resolves the signature off the runtime directory when the environment
+//! cannot supply it.
 
 use crate::state::Target;
 use std::collections::HashMap;
@@ -251,7 +267,7 @@ fn retarget(from: &Terminal, target: &Target) -> Result<bool, String> {
 /// zellij swallows whole.
 fn wake(window: u32) -> Result<(), String> {
     for _ in 0..2 {
-        let out = Command::new("hyprctl")
+        let out = hyprctl()
             .arg("repl")
             .arg(wake_lua(window))
             .output()
@@ -322,7 +338,7 @@ fn arrived(client: u32, session: &str) -> bool {
 /// Bring a window to the front. `Ok(false)` means the compositor no longer knows that pid — a
 /// race against a terminal closing, not a failure.
 fn raise(window: u32) -> Result<bool, String> {
-    let out = Command::new("hyprctl")
+    let out = hyprctl()
         .arg("repl")
         .arg(raise_lua(window))
         .output()
@@ -361,7 +377,7 @@ fn raise_lua(window: u32) -> String {
 /// Every pid the compositor owns a window for. Asked for as a flat list rather than parsed out of
 /// `hyprctl clients -j`, so this module still needs no JSON.
 fn window_pids() -> Result<Vec<u32>, String> {
-    let out = Command::new("hyprctl")
+    let out = hyprctl()
         .arg("repl")
         .arg(
             "local t={} for _,w in ipairs(hl.get_windows()) do t[#t+1]=w.pid end \
@@ -370,8 +386,18 @@ fn window_pids() -> Result<Vec<u32>, String> {
         .output()
         .map_err(|e| format!("hyprctl: {e}"))?;
 
-    parse_window_pids(String::from_utf8_lossy(&out.stdout).trim())
-        .ok_or_else(|| "hyprctl: could not read the window list".to_string())
+    // ⚠️ The complaint is quoted back rather than swallowed. `hyprctl` answers a question it
+    // cannot ask on *stdout* and exits 0, so this string is the only place its reason survives
+    // — and "could not read the window list" alone sent one real failure to the journal every
+    // five seconds for a day without ever naming `HYPRLAND_INSTANCE_SIGNATURE`.
+    let said = String::from_utf8_lossy(&out.stdout);
+    let said = said.trim();
+    parse_window_pids(said).ok_or_else(|| {
+        format!(
+            "hyprctl: could not read the window list: {}",
+            first_line(said).unwrap_or("it said nothing")
+        )
+    })
 }
 
 /// ⚠️ An empty answer is a desktop with no windows, which is legal. Anything non-numeric is the
@@ -586,6 +612,69 @@ fn attach(session: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The environment variable `hyprctl` uses to find the compositor it should talk to.
+const HYPR_SIGNATURE: &str = "HYPRLAND_INSTANCE_SIGNATURE";
+
+/// A `hyprctl` invocation that knows which compositor it is for.
+///
+/// 🔴 **The signature is resolved here because this process cannot have inherited it** —
+/// see the module note. systemd starts the applet at boot, Hyprland starts inside that same
+/// session afterwards, and the unit's environment is a snapshot taken before the compositor
+/// existed. Without this, `terminals` fails on its first call and *every* click is a no-op.
+///
+/// An environment that does have it wins: that is the compositor the person is actually looking
+/// at, and it is the only answer that stays right when a second one is running.
+fn hyprctl() -> Command {
+    let mut cmd = Command::new("hyprctl");
+    if std::env::var_os(HYPR_SIGNATURE).is_none()
+        && let Some(signature) = hypr_signature()
+    {
+        cmd.env(HYPR_SIGNATURE, signature);
+    }
+    cmd
+}
+
+/// The running compositor's signature, read off `$XDG_RUNTIME_DIR/hypr` the way `hyprctl`
+/// itself lays it out: one directory per instance, named by the signature, holding the socket.
+///
+/// ⚠️ **A directory is not an instance — a socket is.** Hyprland leaves the directory (and its
+/// log) behind when it exits, so a box that has been through a compositor restart has several,
+/// and only one of them can still be spoken to. Requiring `.socket.sock` drops the corpses, and
+/// the newest of what survives is the live one.
+fn hypr_signature() -> Option<std::ffi::OsString> {
+    live_instance(&runtime_dir()?.join("hypr"))
+}
+
+/// The newest instance directory under `hypr` that still has a socket in it.
+///
+/// The directory is an argument so the rule above is a test rather than a thing you have to
+/// restart a compositor to see.
+fn live_instance(hypr: &std::path::Path) -> Option<std::ffi::OsString> {
+    let mut instances: Vec<(std::time::SystemTime, std::ffi::OsString)> = std::fs::read_dir(hypr)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().join(".socket.sock").exists())
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.file_name())))
+        .collect();
+    instances.sort_by_key(|(modified, _)| *modified);
+    instances.pop().map(|(_, name)| name)
+}
+
+/// `$XDG_RUNTIME_DIR`, or the path systemd would have put it at.
+///
+/// ⚠️ The fallback exists for the same reason this whole function does: a unit started before
+/// the graphical session may be missing this variable too, and `/run/user/<uid>` is where the
+/// user manager has already mounted it. The uid comes from `/proc/self`, so no libc is needed
+/// for one number.
+fn runtime_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return Some(std::path::PathBuf::from(dir));
+    }
+    use std::os::unix::fs::MetadataExt as _;
+    let uid = std::fs::metadata("/proc/self").ok()?.uid();
+    Some(std::path::PathBuf::from(format!("/run/user/{uid}")))
+}
+
 /// A `zellij` invocation that is honest about not being inside a session.
 ///
 /// ⚠️ **Not merely tidy — `zellij action` *hangs* when `ZELLIJ_SESSION_NAME` names a session that
@@ -766,6 +855,50 @@ u_str ESTAB 0 0 /run/user/1000/wayland-1 900 * 901 users:((\"ghostty\",pid=5091,
         assert_eq!(parse_window_pids("5091,62859"), Some(vec![5091, 62859]));
         assert_eq!(parse_window_pids(""), Some(vec![]));
         assert_eq!(parse_window_pids("Lua error: nope"), None);
+    }
+
+    /// 🔴 The failure that made every click a no-op: an applet started before the
+    /// compositor has no `HYPRLAND_INSTANCE_SIGNATURE`, and `hyprctl` then answers this on
+    /// **stdout** with exit 0. It has to be read as broken, never as "no windows" — the latter
+    /// would open a duplicate terminal for a session already on screen.
+    #[test]
+    fn hyprctl_refusing_to_answer_is_not_an_empty_desktop() {
+        assert_eq!(
+            parse_window_pids("HYPRLAND_INSTANCE_SIGNATURE not set! (is hyprland running?)"),
+            None
+        );
+    }
+
+    /// A directory is left behind when a compositor exits; only the socket says one is live.
+    #[test]
+    fn the_live_instance_is_the_newest_one_with_a_socket() {
+        let root = std::env::temp_dir().join(format!("claude-tray-hypr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Two corpses and one live instance, created oldest first so mtimes order themselves.
+        for (name, socket) in [("dead_old", true), ("live", true), ("logs_only", false)] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            if socket {
+                std::fs::write(root.join(name).join(".socket.sock"), "").unwrap();
+            }
+        }
+        // `logs_only` is newest and has no socket, so it must lose to `live`.
+        let touch = |name: &str| {
+            std::fs::write(root.join(name).join("hyprland.log"), "x").unwrap();
+        };
+        touch("dead_old");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        touch("live");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        touch("logs_only");
+
+        assert_eq!(live_instance(&root).as_deref(), Some("live".as_ref()));
+
+        let empty = root.join("nothing-here");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(live_instance(&empty), None);
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// ⚠️ The wake is only invisible while it is a key zellij consumes — `Ctrl e`, its

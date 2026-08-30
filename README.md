@@ -215,13 +215,18 @@ WantedBy=default.target
 
 ⚠️ **On NixOS, set the unit's `PATH` explicitly.** NixOS gives user units a sanitised environment
 holding only coreutils, findutils, grep, sed and systemd — it overrides the user manager's own PATH,
-so both `claude-ps` and `zellij` go missing and the applet shows only `⊘` with a dead jump.
+so `claude-ps`, `zellij`, `ss` and `hyprctl` go missing and the applet shows only `⊘` with a dead
+jump.
 Neither should be pinned to a store path: `claude-ps` so it stays upgradeable underneath, and
 `zellij` because the jump talks to a **running server** and a different build would speak to it
 wrongly.
 
 ⚠️ `%h` is expanded in `ExecStart` but **not** in `Environment=`, so a PATH pointing into `$HOME`
 must be written out in full.
+
+⚠️ **Do not try to fix the jump by adding `HYPRLAND_INSTANCE_SIGNATURE` to the unit.** It cannot
+be known at the time the unit is written — the applet resolves it at every call instead. See
+*Jumping to a pane*.
 
 ## Notes on the rendering
 
@@ -247,20 +252,50 @@ Everything below was observed in a real Waybar 0.15.0, not reasoned about.
 
 ## Jumping to a pane
 
-`zellij.pane` is `$ZELLIJ_PANE_ID`, which is exactly what `zellij action focus-pane-id`
-takes, addressed at a session by name from outside it. So a click is one process spawn.
+Clicking a row puts you in front of that agent. 🎯 **One terminal, many sessions** — so the rule
+is *retarget the terminal you already have*, and open one only when there is none at all. There
+is no which-window arbitration because there is nothing to arbitrate.
 
-The producer nests it with `zellij.session` in one object, or emits `null` — so a row either has
-a whole address or none, and there is no half-answer for the jump to guard against.
+`zellij.pane` is `$ZELLIJ_PANE_ID`, which is exactly what `zellij action focus-pane-id` takes,
+addressed at a session by name from outside it. The producer nests it with `zellij.session` in
+one object, or emits `null` — so a row either has a whole address or none, and there is no
+half-answer for the jump to guard against.
 
-⚠️ **It does not raise a window.** Nothing links a Hyprland window to the zellij session running
-inside it, so the honest scope is: whichever terminal is already attached moves to the right
-pane. Guessing at the window — by title match, or by spawning a second `zellij attach` client —
-was considered and rejected as guesswork stacked on a clean primitive.
+🔴 **A zellij client's `argv` names the session it originally attached to, not the one it is
+showing.** The live session comes from the socket instead: a client is connected to exactly one
+`zellij --server <path>/<session>`, so pairing the two ends of that socket names the session as
+fact. ⚠️ `/proc/net/unix` does not carry peer inodes — only `ss` does, over sock_diag netlink —
+which is why the jump shells out for it.
+
+🔴 **`switch-session` is delivered to the last client that pressed a key in that session**, and a
+client that arrived by *switching* has pressed none. So the terminal is woken with a `Ctrl e`
+pair — a binding zellij swallows whole, so it never reaches the pane — and the switch is then
+**verified** by reading the client's live session back, rather than trusted to its exit code.
 
 ⚠️ `zellij` exits **0** when the session does not exist, printing the session list instead; only
 a bad *pane* id exits non-zero. A successful focus is silent on both streams, so silence is what
 this checks.
+
+### `hyprctl` needs a signature this process cannot inherit
+
+🔴 **This is what made every click a no-op**, and it is worth reading before touching the unit
+file. The jump asks Hyprland which pids own windows and then raises one, and `hyprctl` finds the
+compositor through `HYPRLAND_INSTANCE_SIGNATURE`. systemd brings the user session up at boot and
+Hyprland is an ordinary process *inside* it, so the unit's environment is fixed before the
+compositor exists and never learns the signature. An `import-environment` would have to run after
+the applet rather than before it.
+
+⚠️ **And it failed silently.** `hyprctl` prints `HYPRLAND_INSTANCE_SIGNATURE not set!` **on
+stdout** and exits **0** — the exit code says success and the answer is prose. That is why
+nothing in the jump reads an exit code from it: every call matches on what came back instead,
+and prose is not a window list.
+
+So the applet resolves the signature itself, off `$XDG_RUNTIME_DIR/hypr`: one directory per
+instance, named by the signature. ⚠️ **A directory is not an instance — a socket is.** Hyprland
+leaves the directory and its log behind when it exits, so a box that has been through a
+compositor restart has several and only one can still be spoken to; requiring `.socket.sock`
+drops the corpses, and the newest of what survives is the live one. An environment that *does*
+carry the variable always wins, since that is the compositor the person is actually looking at.
 
 ## Licence
 
