@@ -1,30 +1,30 @@
 //! The one thing this applet asks the outside world: *what is running right now?*
 //!
-//! 🔴 **This shells out to `claude-agents`; it never reads `~/.claude/sessions` itself.**
+//! 🔴 **This shells out to `claude-ps`; it never reads `~/.claude/sessions` itself.**
 //! That program already does the pid + `procStart` liveness check that keeps a recycled pid
 //! from passing a dead agent off as live, and already joins each agent to its zellij session
 //! and pane. Re-deriving any of that here would create a second source that can disagree with
 //! the first — and `zj-picker` is already the second consumer of the first.
 //!
-//! What comes back is deliberately *raw*. `claude-agents` passes `status` through untouched and
+//! What comes back is deliberately *raw*. `claude-ps` passes `status` through untouched and
 //! its README tells consumers not to match it against a fixed set. Interpreting it is
 //! [`crate::state`]'s job, not this module's. Everything here stays at the level of "nine
 //! TAB-separated columns arrived, here they are".
 
 use std::process::Command;
 
-/// The program is looked up on `PATH` rather than pinned to a store path, so `claude-agents`
+/// The program is looked up on `PATH` rather than pinned to a store path, so `claude-ps`
 /// can be upgraded underneath the applet without rebuilding it.
-const PRODUCER: &str = "claude-agents";
+const PRODUCER: &str = "claude-ps";
 
-/// The column count as of `claude-agents` 0.1.0 with `started_at`.
+/// The column count as of `claude-ps` 0.1.0 with `started_at`.
 ///
 /// ⚠️ Checked exactly, not as a minimum. `zj-picker` learned this the hard way: a positional
 /// parse that tolerates extra columns keeps running against a schema it no longer understands.
 /// A mismatch here is a loud [`Error::Columns`], which reaches the tray as `⊘`.
 const FIELDS: usize = 9;
 
-/// One line of `claude-agents` output, still uninterpreted.
+/// One line of `claude-ps` output, still uninterpreted.
 ///
 /// Only the fields this applet reads are kept. `pid`, `session_id` and `cwd` are parsed for the
 /// arity check and then dropped.
@@ -65,7 +65,7 @@ pub struct Row {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// `claude-agents` is not on `PATH`, or could not be executed.
+    /// `claude-ps` is not on `PATH`, or could not be executed.
     NotFound,
     /// It ran and exited non-zero.
     Failed { code: Option<i32> },

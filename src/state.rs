@@ -1,6 +1,6 @@
-//! The mapping from what `claude-agents` says to what the tray shows.
+//! The mapping from what `claude-ps` says to what the tray shows.
 //!
-//! 🔴 **This is the one place the mapping lives.** `claude-agents` passes `status` through
+//! 🔴 **This is the one place the mapping lives.** `claude-ps` passes `status` through
 //! verbatim and tells consumers not to match it against a fixed set, so somebody downstream has
 //! to decide — and it has to be the same somebody that draws the badge and builds the menu, or
 //! the count and the list can disagree about the same session.
@@ -257,7 +257,7 @@ fn classify(row: &Row, now: u64) -> State {
 
 /// Turn a poll into a repaint.
 ///
-/// Ordering is this module's job and nobody else's: `claude-agents` sorts by session, pane and
+/// Ordering is this module's job and nobody else's: `claude-ps` sorts by session, pane and
 /// pid so that two runs a second apart diff cleanly, and says in its README that this order is
 /// for diffing rather than reading. **Actionable first, then oldest first** — within a group,
 /// the row that has been waiting longest is the one that has been ignored longest.

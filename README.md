@@ -6,7 +6,7 @@ Which Claude Code sessions are waiting on you, in the system tray.
   ✻        nothing wants you                (the Claude mark, alone)
   ✻ 3      three finished their turn        (count in the bar's foreground)
   ✻ 2      at least one is blocked on you   (count in amber)
-  ✻ ⊘      claude-agents could not be run   (⊘ in red)
+  ✻ ⊘      claude-ps could not be run       (⊘ in red)
 ```
 
 **The mark never changes.** It is identity, not state — the same terracotta burst in every
@@ -26,7 +26,7 @@ need input and which have finished without visiting each one. This makes that st
 
 ## It does not read the session registry
 
-🔴 **It shells out to [`claude-agents`](https://github.com/lorenzolfm/claude-agents) and parses
+🔴 **It shells out to [`claude-ps`](https://github.com/lorenzolfm/claude-ps) and parses
 its TSV.**
 
 That program already does the pid + `procStart` liveness check that stops a recycled pid from
@@ -34,11 +34,11 @@ passing a dead agent off as live, and already joins each agent to its zellij ses
 Re-deriving any of it here would create a second source that can disagree with the first — and
 `zj-picker` is already the second consumer of the first. One joiner, many consumers.
 
-`claude-agents` is looked up on `PATH`, not pinned, so it can be upgraded underneath the applet.
+`claude-ps` is looked up on `PATH`, not pinned, so it can be upgraded underneath the applet.
 
 ## What it decides
 
-`claude-agents` passes `status` through verbatim and tells consumers not to match it against a
+`claude-ps` passes `status` through verbatim and tells consumers not to match it against a
 fixed set. So the mapping lives here, in `src/state.rs`, and nowhere else — it has to be the same
 code that draws the badge and builds the menu, or the count and the list could disagree about the
 same session.
@@ -96,7 +96,7 @@ Three rules are load-bearing and are each pinned by a test:
 The list is a **pure mirror**. There is no dismiss and no unread; opening the menu resets
 nothing. The count is *pending*, always.
 
-Ordering is this program's job: `claude-agents` sorts for clean diffs and says so. Here it is
+Ordering is this program's job: `claude-ps` sorts for clean diffs and says so. Here it is
 **actionable first, then oldest first** — within a group, the row waiting longest is the one
 ignored longest.
 
@@ -122,7 +122,7 @@ Three colours, each meaning exactly one thing:
 | `#D97757` | the mark, always | identity — it never changes |
 | `#fdf6e3` | the count | *n* turns have finished |
 | `#e5c07b` | the count | at least one session is **blocked on you** |
-| `#e06c75` | `⊘` | the applet **cannot see** — `claude-agents` is missing or failing |
+| `#e06c75` | `⊘` | the applet **cannot see** — `claude-ps` is missing or failing |
 
 🔴 **The pixmap used to be monochrome so that colour could live in `style.css`. That reason is
 gone** — see the warning below: a tray item is a `Gtk::Image` and `color` does nothing to it. So
@@ -153,7 +153,7 @@ ignored. Any cue has to be a property of the box.
 nix profile install github:lorenzolfm/claude-tray
 ```
 
-Needs `claude-agents` on `PATH` and a session bus. The mark needs no font — it is rasterised
+Needs `claude-ps` on `PATH` and a session bus. The mark needs no font — it is rasterised
 from the vendored SVG — but the badge does, so the nix package pins one carrying `⊘` and the
 digits via `CLAUDE_TRAY_FONT`; a `cargo` build falls back to fontconfig.
 
@@ -200,8 +200,8 @@ WantedBy=default.target
 
 ⚠️ **On NixOS, set the unit's `PATH` explicitly.** NixOS gives user units a sanitised environment
 holding only coreutils, findutils, grep, sed and systemd — it overrides the user manager's own PATH,
-so both `claude-agents` and `zellij` go missing and the applet shows only `⊘` with a dead jump.
-Neither should be pinned to a store path: `claude-agents` so it stays upgradeable underneath, and
+so both `claude-ps` and `zellij` go missing and the applet shows only `⊘` with a dead jump.
+Neither should be pinned to a store path: `claude-ps` so it stays upgradeable underneath, and
 `zellij` because the jump talks to a **running server** and a different build would speak to it
 wrongly.
 

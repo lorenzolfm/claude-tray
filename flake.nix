@@ -16,7 +16,7 @@
     ...
   }:
     flake-parts.lib.mkFlake {inherit inputs;} {
-      # Linux only, like claude-agents and for the same reason once removed: this shells out
+      # Linux only, like claude-ps and for the same reason once removed: this shells out
       # to it, and it reads /proc. A darwin build would start, publish a tray item and report
       # nothing forever, which is worse than not being offered.
       systems = [
@@ -72,7 +72,7 @@
             # `lang=und-zsye` and resolves the `emoji` family, which on this one lands on
             # Noto Color Emoji. Pinning it here would do nothing; there is no variable to set.
             #
-            # `claude-agents` is deliberately NOT pinned here. It is the thing this applet
+            # `claude-ps` is deliberately NOT pinned here. It is the thing this applet
             # reads the world through, and Lorenzo upgrades it on its own cadence; wiring a
             # store path in would mean rebuilding the tray to pick up a producer change.
             # It is looked up on PATH, and a missing one is a state the tray renders as ⊘.
