@@ -4,7 +4,7 @@
 //! That program already does the pid + `procStart` liveness check that keeps a recycled pid
 //! from passing a dead agent off as live, and already joins each agent to its zellij session
 //! and pane. Re-deriving any of that here would create a second source that can disagree with
-//! the first — and `zj-picker` is already the second consumer of the first.
+//! the first — and `luneta` is already the second consumer of the first.
 //!
 //! What comes back is deliberately *raw*. `claude-ps` passes `status` through untouched and
 //! its README tells consumers not to match it against a fixed set. Interpreting it is
@@ -33,18 +33,6 @@ pub struct Zellij {
     pub pane: String,
 }
 
-/// How loaded a session's context is, at its last completed assistant turn.
-///
-/// ⚠️ Tokens only. The producer emits no percentage because the window size is not written to
-/// disk anywhere, and this applet does not invent one: a model-name table would render a wrong
-/// denominator as a number that looks right. `as_of` is on the wire and deliberately not read
-/// here — the row already shows how long the agent has sat in its status, which is the same
-/// staleness by a route the user can already see.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub struct Context {
-    pub tokens: u64,
-}
-
 /// One agent out of `claude-ps`, still uninterpreted.
 ///
 /// Only the keys this applet reads are kept; the rest of the object is ignored. ⚠️ That is
@@ -52,13 +40,17 @@ pub struct Context {
 /// tenth column used to be a hard [`Error::Parse`] and a blind tray.
 ///
 /// 🔴 **`name` and `session` are two different things, and calling both of them "the session
-/// name" is what [[CSB-15]] cost.** `name` is Claude Code's own label — the cwd basename plus a
-/// two-character suffix, so `…/infra.git/master` becomes `master-3c`. `zellij.session` is the
-/// zellij session that agent is sitting in, `infra`. Only the second is an address, and the
-/// first can be unrelated to it. [[CSB-2]] justified dropping `cwd` on the grounds that "the
-/// session name already *is* its basename", which is true of `name` and false of
-/// `zellij.session`; rows are named by the latter now, and `name` survives only as the fallback
-/// for an agent outside zellij.
+/// name" is what [[CSB-15]] cost.** `name` is Claude Code's label — for a *derived* one, the cwd
+/// basename plus a two-character suffix, so `…/infra.git/master` becomes `master-3c`.
+/// `zellij.session` is the zellij session that agent is sitting in, `infra`. Only the second is
+/// an address, and the first can be unrelated to it. [[CSB-2]] justified dropping `cwd` on the
+/// grounds that "the session name already *is* its basename", which is true of a derived `name`
+/// and false of `zellij.session`.
+///
+/// ⚠️ `name_source` is what re-opened that question. A name a *person* chose is not the cwd
+/// twice over — it is the only string on the row that says what the agent is for — so the label
+/// is now the chosen name where there is one and the session where there is not. Which name is
+/// which is `name_source`'s answer and nobody else's; see `state::chosen_name`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Row {
     /// Verbatim from the producer. `busy | idle | waiting | shell`, or anything a future
@@ -70,36 +62,46 @@ pub struct Row {
     /// ⚠️ Not time since the session started, and it does **not** advance during a busy turn —
     /// `statusUpdatedAt` marks entry into a state. On a working row this reads as turn
     /// duration, which is the only surface a wedged session shows up on.
-    #[serde(rename = "age", default)]
+    ///
+    /// 🔴 **Deliberately not `#[serde(default)]`, and it is the one field here that is strict.**
+    /// It was defaulted, and the producer then renamed the key from `age` to `status_age`
+    /// underneath it — so every row deserialised to `0` and every menu line read `<1m` for every
+    /// agent, forever. A silent zero is worse than a stopped parse: it is not a blank the eye
+    /// skips, it is a confident answer that happens to be wrong, on the column that says whether
+    /// anything is wedged. Absent now costs the poll and puts the reason in the menu, which is
+    /// what the tolerance on every other field is *for* — an unknown key costs nothing precisely
+    /// so that a known one can be loud.
+    ///
+    /// The alias keeps a `claude-ps` older than that rename working, since neither side is
+    /// versioned against the other.
+    #[serde(rename = "status_age", alias = "age")]
     pub transition_age_s: u64,
     /// `None` when the agent is not inside zellij — an ordinary state, not a failure. Such a
     /// row still counts and still renders; it simply has nowhere to jump to.
     #[serde(default)]
     pub zellij: Option<Zellij>,
-    /// `None` when the producer could not find the transcript. That join is a derivation rather
-    /// than a proof, so a missing count is ordinary and costs this row its number, nothing more.
-    #[serde(default)]
-    pub context: Option<Context>,
-    /// Claude Code's own label for the session, derived by it from the cwd basename.
+    /// Claude Code's label for the session — sometimes its own, sometimes a person's.
     ///
-    /// ⚠️ **Not what a row is named by** — see the note above, and `state::name_rows`.
-    /// It renders only when `zellij` is `None`, where it is the sole identifier left.
+    /// ⚠️ **Worth showing only when someone chose it** — see [`Row::name_source`] and
+    /// `state::name_rows`. A `derived` name is the cwd basename plus a suffix, and the row
+    /// already has an address of its own to be called by.
     #[serde(default, deserialize_with = "null_as_empty")]
     pub name: String,
-    /// Wall-clock unix seconds at session start.
+    /// Who chose [`Row::name`]: `user`, `peer`, `derived`, `collision`, `auto`, `hook`, or
+    /// anything a later Claude Code invents. `None` is the state before the key existed.
     ///
-    /// ⚠️ This is `startedAt`, not `procStart` — the latter is jiffies-since-boot and is
-    /// meaningless in arithmetic against a timestamp. Newborn suppression needs this one.
+    /// ⚠️ Optional on purpose, unlike `status_age`: `null` is a value the producer documents
+    /// rather than a key that went missing.
     #[serde(default)]
-    pub started_at: u64,
+    pub name_source: Option<String>,
 }
 
 /// A `null` string from the producer becomes empty here rather than `Option`.
 ///
 /// The producer emits `null` only where Claude Code's own file lacked the field entirely, which
 /// is a schema move rather than an ordinary state. The applet has no better answer than
-/// "unknown", and an empty status classifies as `Working` — never actionable, so it renders the
-/// agent rather than inventing a badge for it.
+/// "unknown", and an empty status classifies as `Other` — never counted, so it renders the agent
+/// rather than inventing a badge for it.
 fn null_as_empty<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
 }
@@ -152,14 +154,15 @@ mod tests {
     const OUT: &str = r#"[
       {
         "status": "idle",
-        "age": 14493,
+        "status_age": 14493,
         "zellij": { "session": "bipa", "pane": "0" },
-        "context": { "tokens": 187953, "as_of": 1788052221 },
         "name": "projeto-ponte-55",
+        "name_source": "derived",
         "pid": 3134390,
         "session_id": "some-uuid",
-        "started_at": 1787965062,
-        "cwd": "/home/lorenzo/p"
+        "session_started_at": 1787965062,
+        "cwd": "/home/lorenzo/p",
+        "permission_mode": null
       }
     ]"#;
 
@@ -174,21 +177,20 @@ mod tests {
                     session: "bipa".into(),
                     pane: "0".into()
                 }),
-                context: Some(Context { tokens: 187953 }),
                 name: "projeto-ponte-55".into(),
-                started_at: 1787965062,
+                name_source: Some("derived".into()),
             }]
         );
     }
 
     /// 🔴 The inversion this change bought. Under positional columns a tenth column was a hard
-    /// error and a blind tray; the producer gaining `started_at` is exactly what that cost.
+    /// error and a blind tray; the producer gaining `permission_mode` is exactly what that cost.
     /// A key this build has never heard of is now a non-event.
     #[test]
     fn an_unknown_key_is_not_an_error() {
         let extended = OUT.replace(
-            r#""age": 14493,"#,
-            r#""age": 14493, "something_new": true,"#,
+            r#""status_age": 14493,"#,
+            r#""status_age": 14493, "something_new": true,"#,
         );
         assert_eq!(parse(&extended).unwrap()[0].transition_age_s, 14493);
     }
@@ -201,6 +203,23 @@ mod tests {
         assert!(matches!(parse(&renamed), Ok(rows) if rows[0].raw_status.is_empty()));
 
         assert!(matches!(parse("[{]"), Err(Error::Parse(_))));
+    }
+
+    /// 🔴 The one field tolerance is *not* extended to, and the reason the rest of them can be
+    /// tolerant. `claude-ps` renaming `age` to `status_age` under a defaulted field turned every
+    /// row's age into a confident `0`; a stopped parse says so instead.
+    #[test]
+    fn a_missing_age_stops_the_parse_rather_than_reading_zero() {
+        let aged_out = OUT.replace(r#""status_age": 14493,"#, "");
+        assert!(matches!(parse(&aged_out), Err(Error::Parse(_))));
+    }
+
+    /// The other side of that: a `claude-ps` from before the rename still works, because neither
+    /// side is versioned against the other.
+    #[test]
+    fn the_age_key_before_the_rename_still_reads() {
+        let old = OUT.replace(r#""status_age": 14493"#, r#""age": 14493"#);
+        assert_eq!(parse(&old).unwrap()[0].transition_age_s, 14493);
     }
 
     /// 🔴 No agents is `[]`, and must be an empty list rather than a failure — otherwise
@@ -218,16 +237,15 @@ mod tests {
         assert_eq!(parse(&outside).unwrap()[0].zellij, None);
     }
 
-    /// A producer that could not find the transcript costs the row its number, not the row.
+    /// ⚠️ `null` is a value the producer documents for this key, not a key going missing — the
+    /// state before Claude Code recorded who named a session.
     #[test]
-    fn a_null_context_is_not_a_failure() {
-        let nulled = OUT.replace(
-            r#""context": { "tokens": 187953, "as_of": 1788052221 }"#,
-            r#""context": null"#,
-        );
-        let rows = parse(&nulled).unwrap();
-        assert_eq!(rows[0].context, None);
-        assert_eq!(rows[0].raw_status, "idle");
+    fn an_absent_name_source_is_not_a_failure() {
+        let nulled = OUT.replace(r#""name_source": "derived""#, r#""name_source": null"#);
+        assert_eq!(parse(&nulled).unwrap()[0].name_source, None);
+
+        let dropped = OUT.replace(r#""name_source": "derived","#, "");
+        assert_eq!(parse(&dropped).unwrap()[0].name_source, None);
     }
 
     /// A `null` status is a schema move, not a reason to drop a live agent off the list.

@@ -3,9 +3,8 @@
 Which Claude Code sessions are waiting on you, in the system tray.
 
 ```text
-  ✻        nothing wants you                (the Claude mark, alone)
-  ✻ 3      three finished their turn        (count in the bar's foreground)
-  ✻ 2      at least one is blocked on you   (count in amber)
+  ✻        nothing is blocked on you        (the Claude mark, alone)
+  ✻ 2      two agents asked you something   (count in amber)
   ✻ ⊘      claude-ps could not be run       (⊘ in red)
 ```
 
@@ -32,24 +31,37 @@ the JSON it prints.**
 That program already does the pid + `procStart` liveness check that stops a recycled pid from
 passing a dead agent off as live, and already joins each agent to its zellij session and pane.
 Re-deriving any of it here would create a second source that can disagree with the first — and
-`zj-picker` is already the second consumer of the first. One joiner, many consumers.
+[`luneta`](https://github.com/lorenzolfm/luneta) is already the second consumer of the first.
+One joiner, many consumers.
 
 `claude-ps` is looked up on `PATH`, not pinned, so it can be upgraded underneath the applet.
 
-## The token count on each row
+## What a row is called
 
-`claude-ps` reports how much context each agent was carrying at its last assistant turn, and
-each menu row carries it as a trailing `188k`.
+`claude-ps` reports both the agent's `name` and **who chose it**, and the second half is the
+load-bearing one. So a row is named in three steps:
 
-⚠️ **Tokens, never a percentage.** The context window *size* is never written to disk — Claude
-Code computes it and hands it to a status line at render time — so a denominator here would have
-to come from a model-name table that goes confidently wrong the day a new model ships. That is
-the same failure this applet avoids by passing `status` through, and worse: an unrecognised
-status renders as itself, while a wrong denominator renders as a number that looks right.
+1. the name a **person** chose (`name_source` of `user` or `peer`) — the only string on the row
+   that says what the agent is *for*;
+2. failing that, the **zellij session** it is sitting in, which is the thing you navigate by;
+3. failing that, Claude Code's own label, for an agent outside zellij that would otherwise have
+   no name at all.
 
-A row whose count is missing simply **omits** it. The producer's join for this one key is a path
-derived from `cwd` rather than a proof, so "not known" is ordinary — and a `0` there would be a
-lie the eye cannot catch.
+🔴 **A `derived` name is the cwd basename plus a two-character suffix**, so a row that showed it
+would be named after a directory it is only incidentally in — and `…/infra.git/master` would read
+`master-3c` for a session you reach as `infra`. That is [`luneta`](https://github.com/lorenzolfm/luneta)'s
+rule, taken whole.
+
+⚠️ **An unrecognised `name_source` is suppressed**, which is the exact opposite of what an
+unrecognised *status* gets. The asymmetry is the producer's and is deliberate on both sides:
+every status value is a real state, so hiding one hides a live agent, whereas the sources that
+carry a chosen name are a short closed list (`user`, `peer`) and the machinery is the long open
+one — Claude Code already writes `derived`, `collision`, `auto` and `hook`. A source invented
+tomorrow is far likelier to be more machinery. An **absent** source is trusted, because that is
+the state before the key existed rather than one this build failed to recognise.
+
+When two visible rows end up with the same name, **every** one of them takes a `:pane` suffix.
+"The first one is bare" is not a rule anyone could read off the menu.
 
 ## What it decides
 
@@ -58,20 +70,24 @@ fixed set. So the mapping lives here, in `src/state.rs`, and nowhere else — it
 code that draws the badge and builds the menu, or the count and the list could disagree about the
 same session.
 
-| raw status | | shown as | counted |
-|---|---|---|---|
-| `waiting` | | 🙋 **needs input** | ✅ |
-| `idle`, under an hour in state | | ☕ **your turn** | ✅ |
-| `idle`, an hour or more | | ☕ idle | — |
-| `idle`, under 30 s since the session started | | ☕ idle | — |
-| `busy` | | ⣾ working | — |
-| `shell` | | 🐚 working | — |
-| anything else | | 🛸 working | — |
+| raw status | | shown as | sorts | counted |
+|---|---|---|---|---|
+| `waiting` | | 🙋 `waiting` | 1st | ✅ |
+| `idle` | | ☕ `idle` | 2nd | — |
+| `busy` | | ⣾ `busy` | 3rd | — |
+| `shell` | | 🐚 `shell` | last | — |
+| anything else | | 🛸 *itself* | last | — |
 
-🔴 **The glyph is the status, and `zj-picker`'s agents tab is the standard for it** — its table
-verbatim, case-insensitivity included, with nothing added and nothing dropped. The same agent
-read in the picker and read here has to be the same picture; a vocabulary that forked per
-surface would be worse than no vocabulary.
+🔴 **The states are [`luneta`](https://github.com/lorenzolfm/luneta)'s four, and so is the
+order** — its agents tab is the standard, its table verbatim, case-insensitivity included, with
+nothing added and nothing dropped. The same agent read in the picker and read here has to be the
+same picture in the same place; a vocabulary that forked per surface is worse than no vocabulary.
+
+⚠️ **`your turn` and `dormant` used to live here and are gone.** They were this end's own
+judgment about `idle`: counted for the first hour, suppressed for the first thirty seconds of a
+session's life, quietly filed away after that. Three thresholds, all guesses, none of them
+anything the picker knew about — so one agent was *your turn* on one surface and plain `idle` on
+the other. The word on a row is now the producer's own, printed as it arrived.
 
 ⚠️ One exception, and it is about ink rather than about meaning: the busy cycle here is
 `⣾⣽⣻⢿⡿⣟⣯⣷` where the picker's is `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`. Seven dots lit per frame instead of three,
@@ -82,38 +98,76 @@ arrives as literal angle brackets — and the one colour dbusmenu does expose, `
 the whole row. *Which* status spins is still the picker's call; only the weight of the frames is
 this end's.
 
-So the glyph carries the producer's word and *only* that. Everything this program decides on top
-of it — counted or not, *your turn* or aged out — is in the word beside the glyph and the block
-the row sits in. Two rows both reading ☕ are two `idle` agents, and the one under the divider is
-the one that stopped nagging.
-
 The spinner really turns, at ten frames a second, and only while the menu is open: `AboutToShow`
 is the one signal that says anyone is looking. There is no matching *closed* — `ksni` 0.3.6
 routes only `clicked` out of `Event` — so it keeps turning for a minute after the last open and
 then stops. Ticking is otherwise free: the producer still runs once every five seconds, and a
 tick with no spinner on screen does not even rebuild the menu.
 
+### The badge counts `waiting`, and nothing else
+
+🔴 **This is the one judgment left on top of the picker's order**, and it is the whole reason the
+applet is in the bar: `badge > 0` means *somebody is blocked on you*, and a `waiting` agent has
+an actual question pending.
+
+`idle` is deliberately not in it. A finished turn is worth a row above the working ones — which
+is why it sorts second — but not a number in the bar, because **nothing retires it**. That is
+what the old hour-long timeout and newborn suppression were for: stopping a session you finished
+with on Tuesday from nagging on Thursday, and stopping a tab you just opened from nagging about
+itself. Both were guesses about how long a person stays interested. Counting only `waiting`
+needs neither.
+
+So there is one badge colour now, where there were two. Everything in the count is blocked, so
+amber says it on its own.
+
 Three rules are load-bearing and are each pinned by a test:
 
-- 🔴 **Anything unrecognised is `working`, never actionable.** Version skew reaches the key set,
-  not just the values, so a status nobody has seen yet is a matter of time. Failing to *working*
-  fails silent; failing to actionable would invent a badge out of a typo.
-- 🔴 **Case never decides what a status is.** `zj-picker` compares every status with
+- 🔴 **Anything unrecognised sorts last and is never counted.** The status vocabulary is open and
+  moves with Claude Code's releases — the set grew by one (`shell`) between two of them already —
+  so a word nobody has seen yet is a matter of time. Ranking it last fails silent; letting it
+  count would invent a badge out of a typo. It still renders, **as itself**.
+- 🔴 **Case never decides what a status is.** The picker compares every status with
   `eq_ignore_ascii_case`, so this does too — a status that is *recognised* on one surface and
-  *unknown* on the other is two mappings again, and the unknown side is the uncounted one, so
-  the skew would hide a row rather than merely mislabel it.
-- 🔴 **The two counted states are asymmetric.** *your turn* ages out after an hour; **needs
-  input never ages**, because a session blocked on a prompt does not unblock itself by being
-  ignored. Do not tidy them into one threshold.
-- 🔴 **Rows that age out are listed, dimmed and uncounted — not hidden.** An hour is only a safe
-  threshold because crossing it means *stops nagging*, not *is lost*.
+  *unknown* on the other is two mappings again.
+- 🔴 **Nothing is ever hidden.** Uncounted is not the same as gone: every live agent gets a row,
+  and every row with an address can be clicked. The only dimmed rows are agents outside zellij,
+  which have nowhere to send you — where dimmed means **inert**.
 
 The list is a **pure mirror**. There is no dismiss and no unread; opening the menu resets
 nothing. The count is *pending*, always.
 
-Ordering is this program's job: `claude-ps` sorts for clean diffs and says so. Here it is
-**actionable first, then oldest first** — within a group, the row waiting longest is the one
-ignored longest.
+## Ordering
+
+Ordering is this program's job: `claude-ps` sorts by pid so that two runs a second apart diff
+cleanly, and says in its README that this order is for diffing rather than reading.
+
+🔴 **It is the picker's order, both halves**: attention first, and within one status **most
+recent first** — the agent that changed a moment ago is the one you were just working with.
+
+⚠️ The second half is a reversal. This menu used to put the *oldest* row of a group on top, on
+the reasoning that it had been ignored longest. The picker's reasoning won because the picker is
+where the navigating actually happens, and two surfaces that disagree about which row is at the
+top are worse than either rule on its own. Ties fall back to the producer's pid order, so two
+agents that changed in the same second do not swap places between polls.
+
+Rows are one flat list, as in the picker. The dividers that used to separate *wants you* from
+*is running* from *has aged out* went with the states they separated; the glyph and the word
+already say which block a row is in.
+
+## The age column moves
+
+Every row ends in how long the agent has been in its current status — `<1m`, `47m`, `3h`, `2d`.
+On a `busy` row that is turn duration, and it is the only surface a wedged session shows up on
+at all.
+
+🔴 **It is the snapshot's age plus how long ago the snapshot was taken.** The list is a glance:
+`claude-ps` runs once every five seconds and once more on the way to opening the menu, and the
+menu is then rebuilt ten times a second off that frozen answer. Without the offset an agent that
+has been waiting three minutes would read the same number for as long as you looked at it — on
+the one column that says whether anything is stuck.
+
+⚠️ Adding it is safe *because* it is the same number on every row: a uniform offset cannot flip
+a comparison, so the ordering above lands exactly where it did and only the ages move.
 
 ## The mark
 
@@ -135,16 +189,18 @@ Three colours, each meaning exactly one thing:
 | | | |
 |---|---|---|
 | `#D97757` | the mark, always | identity — it never changes |
-| `#fdf6e3` | the count | *n* turns have finished |
-| `#e5c07b` | the count | at least one session is **blocked on you** |
+| `#e5c07b` | the count | *n* sessions are **blocked on you** |
 | `#e06c75` | `⊘` | the applet **cannot see** — `claude-ps` is missing or failing |
 
 🔴 **The pixmap used to be monochrome so that colour could live in `style.css`. That reason is
 gone** — see the warning below: a tray item is a `Gtk::Image` and `color` does nothing to it. So
-colour is in the pixels or it is nowhere. Amber over off-white is what the retired `◈`-over-`◆`
-glyph pair used to say, and `#fdf6e3` is not decoration either: the mark's own terracotta was
-tried for the count and it is the dimmest thing on the bar, which is backwards. The mark is the
-part you already know; the number is the part you have to read.
+colour is in the pixels or it is nowhere. Amber is what the retired `◈` glyph used to say.
+
+⚠️ There was a fourth, `#fdf6e3`, for a count of turns that had merely *finished*. It went with
+`your turn`: the number has one meaning now, so it has one colour. 🔴 If a second one is ever
+wanted, note what was already learnt about the first — the mark's own terracotta was tried for
+the count and it is the dimmest thing on the bar, which is backwards. The mark is the part you
+already know; the number is the part you have to read.
 
 The applet also sets SNI status `NeedsAttention` whenever the badge is non-zero (and when the
 producer is broken — `⊘` with no badge at all is not the same claim as a badge of `0`), which
@@ -215,13 +271,18 @@ WantedBy=default.target
 
 ⚠️ **On NixOS, set the unit's `PATH` explicitly.** NixOS gives user units a sanitised environment
 holding only coreutils, findutils, grep, sed and systemd — it overrides the user manager's own PATH,
-so both `claude-ps` and `zellij` go missing and the applet shows only `⊘` with a dead jump.
+so `claude-ps`, `zellij`, `ss` and `hyprctl` go missing and the applet shows only `⊘` with a dead
+jump.
 Neither should be pinned to a store path: `claude-ps` so it stays upgradeable underneath, and
 `zellij` because the jump talks to a **running server** and a different build would speak to it
 wrongly.
 
 ⚠️ `%h` is expanded in `ExecStart` but **not** in `Environment=`, so a PATH pointing into `$HOME`
 must be written out in full.
+
+⚠️ **Do not try to fix the jump by adding `HYPRLAND_INSTANCE_SIGNATURE` to the unit.** It cannot
+be known at the time the unit is written — the applet resolves it at every call instead. See
+*Jumping to a pane*.
 
 ## Notes on the rendering
 
@@ -247,20 +308,50 @@ Everything below was observed in a real Waybar 0.15.0, not reasoned about.
 
 ## Jumping to a pane
 
-`zellij.pane` is `$ZELLIJ_PANE_ID`, which is exactly what `zellij action focus-pane-id`
-takes, addressed at a session by name from outside it. So a click is one process spawn.
+Clicking a row puts you in front of that agent. 🎯 **One terminal, many sessions** — so the rule
+is *retarget the terminal you already have*, and open one only when there is none at all. There
+is no which-window arbitration because there is nothing to arbitrate.
 
-The producer nests it with `zellij.session` in one object, or emits `null` — so a row either has
-a whole address or none, and there is no half-answer for the jump to guard against.
+`zellij.pane` is `$ZELLIJ_PANE_ID`, which is exactly what `zellij action focus-pane-id` takes,
+addressed at a session by name from outside it. The producer nests it with `zellij.session` in
+one object, or emits `null` — so a row either has a whole address or none, and there is no
+half-answer for the jump to guard against.
 
-⚠️ **It does not raise a window.** Nothing links a Hyprland window to the zellij session running
-inside it, so the honest scope is: whichever terminal is already attached moves to the right
-pane. Guessing at the window — by title match, or by spawning a second `zellij attach` client —
-was considered and rejected as guesswork stacked on a clean primitive.
+🔴 **A zellij client's `argv` names the session it originally attached to, not the one it is
+showing.** The live session comes from the socket instead: a client is connected to exactly one
+`zellij --server <path>/<session>`, so pairing the two ends of that socket names the session as
+fact. ⚠️ `/proc/net/unix` does not carry peer inodes — only `ss` does, over sock_diag netlink —
+which is why the jump shells out for it.
+
+🔴 **`switch-session` is delivered to the last client that pressed a key in that session**, and a
+client that arrived by *switching* has pressed none. So the terminal is woken with a `Ctrl e`
+pair — a binding zellij swallows whole, so it never reaches the pane — and the switch is then
+**verified** by reading the client's live session back, rather than trusted to its exit code.
 
 ⚠️ `zellij` exits **0** when the session does not exist, printing the session list instead; only
 a bad *pane* id exits non-zero. A successful focus is silent on both streams, so silence is what
 this checks.
+
+### `hyprctl` needs a signature this process cannot inherit
+
+🔴 **This is what made every click a no-op**, and it is worth reading before touching the unit
+file. The jump asks Hyprland which pids own windows and then raises one, and `hyprctl` finds the
+compositor through `HYPRLAND_INSTANCE_SIGNATURE`. systemd brings the user session up at boot and
+Hyprland is an ordinary process *inside* it, so the unit's environment is fixed before the
+compositor exists and never learns the signature. An `import-environment` would have to run after
+the applet rather than before it.
+
+⚠️ **And it failed silently.** `hyprctl` prints `HYPRLAND_INSTANCE_SIGNATURE not set!` **on
+stdout** and exits **0** — the exit code says success and the answer is prose. That is why
+nothing in the jump reads an exit code from it: every call matches on what came back instead,
+and prose is not a window list.
+
+So the applet resolves the signature itself, off `$XDG_RUNTIME_DIR/hypr`: one directory per
+instance, named by the signature. ⚠️ **A directory is not an instance — a socket is.** Hyprland
+leaves the directory and its log behind when it exits, so a box that has been through a
+compositor restart has several and only one can still be spoken to; requiring `.socket.sock`
+drops the corpses, and the newest of what survives is the live one. An environment that *does*
+carry the variable always wins, since that is the compositor the person is actually looking at.
 
 ## Licence
 

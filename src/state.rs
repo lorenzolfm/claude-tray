@@ -5,22 +5,18 @@
 //! to decide — and it has to be the same somebody that draws the badge and builds the menu, or
 //! the count and the list can disagree about the same session.
 //!
+//! 🔴 **And the decision is `luneta`'s, taken whole.** The two surfaces read the same producer
+//! about the same agents, so an applet that invented a second vocabulary made the same session
+//! two different things depending on where it was read. What used to live here — a `your turn`
+//! that aged out at an hour, a `dormant` that a newborn session was quietly filed under — was
+//! judgment this end had no business holding on its own. There are four states now and they are
+//! the picker's four: `waiting`, `idle`, `busy`, and everything else, in that order. See
+//! [`State`].
+//!
 //! Everything here is pure and takes `now` as an argument, so every rule below is a test rather
 //! than a thing you have to run the applet to see.
 
 use crate::agents::Row;
-
-/// A *your turn* row stops nagging after an hour.
-///
-/// 🔴 Deliberately generous. A badge reading `0` while something waits is a strictly worse
-/// failure than one that over-counts, so the threshold errs long.
-const FINISHED_AFTER_S: u64 = 3600;
-
-/// A session that has only just started is not asking for anything yet.
-///
-/// Without this, opening a tab nags immediately: a fresh agent is `idle`, and `idle` is how
-/// *finished* looks.
-const NEWBORN_S: u64 = 30;
 
 /// Names middle-truncate here. ⚠️ The columns line up only because the GTK menu font on this
 /// box happens to be monospace — a system setting, not a guarantee.
@@ -32,7 +28,7 @@ const NAME_WIDTH: usize = 28;
 /// column keeps its width as the spinner turns rather than shoving the name column back and
 /// forth ten times a second for the whole time an agent is busy.
 ///
-/// 🔴 **These are not `zj-picker`'s frames — the one place this end's picture deliberately
+/// 🔴 **These are not `luneta`'s frames — the one place this end's picture deliberately
 /// departs from it.** Over there the cycle is `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, three dots lit per frame, which is
 /// legible in a terminal and is not legible here: a menu row is drawn in the GTK theme's own
 /// foreground, and three dots of it read as grey lint that may or may not be moving. Colour
@@ -43,54 +39,61 @@ const NAME_WIDTH: usize = 28;
 /// age to fix a grey spinner. So weight is the lever that was left — seven dots lit per frame
 /// instead of three, in the same one-column cell.
 ///
-/// ⚠️ What stays shared with `zj-picker` is the half that carries meaning: **which status spins,
+/// ⚠️ What stays shared with `luneta` is the half that carries meaning: **which status spins,
 /// and that nothing else does**. Somebody who reads the picker reads this menu right; the frames
 /// are heavier, not different. The cycle is eight frames where the picker's is ten, so a turn
 /// takes 0.8 s at `crate::TICK` rather than a round second — a spinner has no speed anyone reads.
 ///
 /// ⚠️ Each frame carries a **trailing space** and the emoji beside it do not. That is the whole
 /// of how this column stays aligned: an emoji is two columns wide where a braille cell is one,
-/// so the space is the second column the spinner would otherwise be missing. `zj-picker`
+/// so the space is the second column the spinner would otherwise be missing. `luneta`
 /// measures its tag column with `unicode-width`; a dependency to measure five known strings is
 /// not the trade here, and it is why the padding lives *in the table* rather than in
 /// [`Entry::label`] — the format string below cannot tell the two widths apart.
 const SPINNER: [&str; 8] = ["⣾ ", "⣽ ", "⣻ ", "⢿ ", "⡿ ", "⣟ ", "⣯ ", "⣷ "];
 
 /// Unidentified, and deliberately not one of the four — a status this build cannot name must
-/// not be able to pass itself off as one it can. `zj-picker`'s, like the rest of the table.
+/// not be able to pass itself off as one it can. `luneta`'s, like the rest of the table.
 const UNKNOWN_GLYPH: &str = "🛸";
 
-/// What the applet believes about one agent.
+/// What the applet believes about one agent — which is now only *where it sorts and whether it
+/// is counted*, because the word on the row is the producer's own.
 ///
-/// Four states, two of them counted. The split is not "urgent vs not" — it is **does this row
-/// want something from Lorenzo**, which is the invariant the badge exists to carry:
-/// `badge > 0 ⟺ there is something to do`.
+/// 🔴 **These are `luneta`'s four ranks and nothing more.** The picker orders `waiting`, then
+/// `idle`, then `busy`, then anything else, and this enum's `Ord` **is** that order — the
+/// variants are declared in it, so `derive(Ord)` is the sort key. Two surfaces, one order.
+///
+/// 🔴 The last variant is the load-bearing one: **anything unrecognised lands in `Other`, and
+/// `Other` is never counted.** The status vocabulary is open and moves with Claude Code — the
+/// set grew by one (`shell`) between two releases already — so a word nobody has seen yet is a
+/// matter of time. Ranking it last fails silent; letting it count would invent a badge out of a
+/// typo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum State {
-    /// Blocked on him. 🔴 **Never ages out** — a permission prompt will not answer itself.
-    NeedsInput,
-    /// Finished its turn recently. Ages out at [`FINISHED_AFTER_S`].
-    YourTurn,
-    /// Busy, or a status this build does not recognise. Listed, never counted.
-    Working,
-    /// Idle and old, or idle and newborn. 🔴 **Listed, dimmed, uncounted — not hidden.**
-    /// Ageing out means *stops nagging*, not *is lost*.
-    Dormant,
+    /// Its hand is up: it asked something and stopped. 🔴 The only counted state.
+    Waiting,
+    /// It finished its turn. Listed above what is still running, and never counted — see
+    /// [`State::is_actionable`].
+    Idle,
+    /// It is working, and will leave this state without you.
+    Busy,
+    /// `shell`, or a status this build has never heard of.
+    Other,
 }
 
 impl State {
-    /// The badge is `count(actionable)`, and this is what actionable means.
+    /// The badge is `count(actionable)`, and this is what actionable means: **blocked on him**,
+    /// and nothing else.
+    ///
+    /// 🔴 `idle` is deliberately *not* here, and this is the one judgment the applet still makes
+    /// on top of the picker's order. A finished turn is worth a row above the working ones — it
+    /// is why `Idle` outranks `Busy` — but it is not worth a number in the bar, because nothing
+    /// retires it: the `your turn` state that used to count it needed an hour-long timeout and a
+    /// newborn suppression to stop a session he finished with on Tuesday from nagging on
+    /// Thursday, and both of those were guesses. A `waiting` agent has an actual question
+    /// pending, so the count means one thing again: **somebody is blocked on you**.
     pub fn is_actionable(self) -> bool {
-        matches!(self, State::NeedsInput | State::YourTurn)
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            State::NeedsInput => "needs input",
-            State::YourTurn => "your turn",
-            State::Working => "working",
-            State::Dormant => "idle",
-        }
+        matches!(self, State::Waiting)
     }
 }
 
@@ -105,41 +108,34 @@ pub struct Target {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub state: State,
-    /// Verbatim from the producer, and what [`Entry::glyph`] draws the row's picture from.
+    /// Verbatim from the producer: what [`Entry::glyph`] draws the row's picture from, **and**
+    /// the word printed beside it.
     ///
-    /// 🔴 **It decides the picture and nothing else.** Whether a row is counted, where it
-    /// sorts, and what word appears beside it are all [`State`]'s, via `classify` — the two
-    /// read the same word by the same rule and reach different questions, which is what keeps
-    /// `zj-picker`'s vocabulary and this applet's judgment from becoming two mappings.
+    /// 🔴 The word is the producer's now, where it used to be [`State`]'s. `luneta` prints the
+    /// status it was given and lets the glyph be the decoration; an applet that printed
+    /// `needs input` beside 🙋 was translating a vocabulary that does not need translating, and
+    /// a status invented after this was written would have arrived as `working` — a word
+    /// claiming to know something about a state nobody here has seen.
     pub raw_status: String,
-    /// What this row calls the agent — its **zellij session name**, which is the string
-    /// Lorenzo navigates by. Filled in by `name_rows`, because a session name can only be
-    /// judged sufficient against the other rows in the same menu.
+    /// What this row calls the agent: the name a **person** chose, or the **zellij session** it
+    /// is sitting in when nobody chose one. Filled in by [`name_rows`], because a name can only
+    /// be judged sufficient against the other rows in the same menu.
     pub title: String,
+    /// Seconds in the current status **when the snapshot was taken**. What renders is this plus
+    /// how long ago that was — see [`Entry::label`].
     pub age_s: u64,
-    /// Tokens in context at the last assistant turn, or `None` when the producer had no
-    /// transcript to read. Rendered as a trailing `188k`; absent rows simply omit it, because
-    /// a `-` in that column would read as "zero tokens" rather than "not known".
-    pub context_tokens: Option<u64>,
     pub target: Option<Target>,
 }
 
 impl Entry {
     /// The picture on this row.
     ///
-    /// 🔴 **Keyed by the producer's word, and `zj-picker`'s agents tab is the standard.** Not by
-    /// [`State`] — which is tempting, because the states are what this applet actually believes
-    /// and they say things no status word does, but it would mean the same agent wore two
-    /// different faces depending on which surface it was read on. One vocabulary, one meaning
-    /// per picture, and this end of it does not get a vote. The table below is `zj-picker`'s
-    /// `agents::glyph`, case-insensitivity included — [`SPINNER`]'s frames are the single
-    /// exception, and they are heavier rather than other. [`classify`] reads the same word the
-    /// same way, so there is no status that can take one module's answer and the other's picture.
-    ///
-    /// ⚠️ So the *state* is not in the glyph at all — a `your turn` row and a `dormant` one are
-    /// both ☕, and what tells them apart is the word beside them and the block they sit in.
-    /// That is `zj-picker`'s bargain too: over there `idle` is one row whether it finished a
-    /// minute ago or yesterday, and the age column is what says which.
+    /// 🔴 **Keyed by the producer's word, and `luneta`'s agents tab is the standard.** Not by
+    /// [`State`] — which is tempting, because the states are what this applet sorts by, but it
+    /// would mean the same agent wore two different faces depending on which surface it was read
+    /// on. One vocabulary, one meaning per picture, and this end of it does not get a vote. The
+    /// table below is `luneta`'s `agents::glyph`, case-insensitivity included — [`SPINNER`]'s
+    /// frames are the single exception, and they are heavier rather than other.
     ///
     /// `frame` is the animation tick, and it reaches exactly one glyph: the busy spinner. Every
     /// other status returns the same string on every frame, which is what lets the tray repaint
@@ -150,7 +146,8 @@ impl Entry {
             // and literally what the agent is doing — it has asked something and stopped.
             "waiting" => "🙋",
             // Not asleep. An idle agent has *finished* and is waiting on your next instruction,
-            // which is why it gets a cup rather than the "do not disturb" of a 💤.
+            // which is why it outranks a busy one — so it gets a cup rather than the "do not
+            // disturb" of a 💤.
             "idle" => "☕",
             // The one glyph that moves, because it is the one status that is *going* somewhere:
             // a busy agent will leave it without you, and the spinner is the row saying so
@@ -172,56 +169,42 @@ impl Entry {
         self.raw_status.eq_ignore_ascii_case("busy")
     }
 
-    /// [[CSB-2]]'s row: `glyph · title · state age`.
+    /// [[CSB-2]]'s row: `glyph · title · status age`.
     ///
     /// `host` is gone — one machine in this slice. `cwd` never renders. **Every** row carries
-    /// an age, working rows included: on a working row the age is turn duration, and it is the
-    /// only place a wedged session becomes visible at all.
-    pub fn label(&self, frame: u64) -> String {
+    /// an age, busy rows included: on a busy row the age is turn duration, and it is the only
+    /// place a wedged session becomes visible at all.
+    ///
+    /// 🔴 `since` is how long ago the snapshot was taken, and it is added here rather than baked
+    /// into [`Entry::age_s`] for the reason `luneta` learnt it: **the list is a glance and the
+    /// clock is not.** The menu is rebuilt ten times a second while it is open and the rows in
+    /// it are five seconds old at worst, so without this an agent that has been waiting three
+    /// minutes reads the same number for as long as you look at it — on the one column that says
+    /// whether anything is stuck. Adding it is safe *because* it is the same number on every
+    /// row: a uniform offset cannot flip a comparison, so the ordering below lands exactly where
+    /// it did and only the ages move.
+    pub fn label(&self, frame: u64, since: u64) -> String {
         format!(
-            "{}  {:<width$}  {} {}{}",
+            "{}  {:<width$}  {} {}",
             self.glyph(frame),
             truncate(&self.title, NAME_WIDTH),
-            self.state.label(),
-            humanise(self.age_s),
-            // Trailing rather than its own column: it is the one field that can be absent, and
-            // a column that is sometimes blank costs every other row its alignment.
-            match self.context_tokens {
-                Some(tokens) => format!("   {}", humanise_tokens(tokens)),
-                None => String::new(),
-            },
+            self.raw_status,
+            humanise(self.age_s.saturating_add(since)),
             width = NAME_WIDTH,
         )
     }
-}
-
-/// A token count at a glance: `950`, `188k`, `1.2M`.
-///
-/// Three significant figures at most, because this is a menu row and the difference between
-/// 187,953 and 188,000 is not a difference anyone acts on.
-fn humanise_tokens(tokens: u64) -> String {
-    if tokens < 1_000 {
-        return format!("{tokens}");
-    }
-    // Rounded to tenths of a million first, so a count that rounds *up* to a million reads as
-    // `1.0M` rather than as `1000k`.
-    let tenths_of_m = (tokens + 50_000) / 100_000;
-    if tenths_of_m >= 10 {
-        return format!("{}.{}M", tenths_of_m / 10, tenths_of_m % 10);
-    }
-    format!("{}k", (tokens + 500) / 1_000)
 }
 
 /// Everything the tray needs for one repaint, derived once so the badge and the list cannot
 /// disagree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
+    /// In `luneta`'s order: attention first, most recent first within a status.
     pub entries: Vec<Entry>,
-    /// `count(actionable)`.
+    /// `count(actionable)` — the agents that are *blocked on him*.
     pub badge: usize,
-    /// At least one row is *blocked* rather than merely finished — which is what earns the
-    /// fourth glyph, so "something is stuck" reads without opening anything.
-    pub blocked: bool,
+    /// Unix seconds this snapshot was taken at, so [`Entry::label`] can say how stale it is.
+    pub taken_at: u64,
 }
 
 impl Snapshot {
@@ -229,8 +212,9 @@ impl Snapshot {
     /// the bare mark, not a `0`, because a zero is still something to read.
     ///
     /// 🔴 This used to prefix a glyph (`◇`/`◆ 3`/`◈ 2`). The mark took that slot, so the
-    /// blocked-vs-merely-finished distinction moved into the *colour* of this count — see
-    /// [`Snapshot::blocked`] and `crate::icon::BLOCKED`. Nothing was dropped, only recoloured.
+    /// blocked-vs-merely-finished distinction moved into the *colour* of this count — and then
+    /// out of it again, when `idle` stopped being counted: everything in this number is blocked
+    /// now, so there is one badge colour left. See `crate::icon::BLOCKED`.
     pub fn badge_text(&self) -> String {
         if self.badge == 0 {
             String::new()
@@ -247,58 +231,57 @@ impl Snapshot {
         self.entries.iter().any(Entry::is_spinning)
     }
 
-    pub fn iter(&self, state: State) -> impl Iterator<Item = &Entry> {
-        self.entries.iter().filter(move |e| e.state == state)
+    /// How stale this snapshot is, in seconds. A clock that has gone backwards reads as fresh,
+    /// which is the quiet direction: the ages stop advancing rather than jumping.
+    pub fn since(&self, now: u64) -> u64 {
+        now.saturating_sub(self.taken_at)
     }
 }
 
-/// Classify one row.
+/// Classify one row — which is now only *where it sorts*, since the word beside the glyph is the
+/// producer's own.
 ///
-/// 🔴 The last arm is the load-bearing one: **anything unrecognised is `Working`, never
-/// actionable.** Version skew reaches the key set on this box — `pidDomain` exists on 2.1.251
-/// records and not on 2.1.241 — so a status nobody has seen yet is a matter of time. Failing to
-/// `Working` fails silent; failing to actionable would invent a badge out of a typo.
-fn classify(row: &Row, now: u64) -> State {
-    let since_start = now.saturating_sub(row.started_at);
-
-    // 🔴 Lowercased because `zj-picker` lowercases — it compares every status with
-    // `eq_ignore_ascii_case`, and its table is the standard for what a status *is*. Matching
-    // exactly here instead would have let a hypothetical `Idle` be a counted row on one surface
-    // and an unrecognised one on the other, and it errs the wrong way besides: an unrecognised
-    // row is never counted, so a badge reading 0 while something waits is exactly the failure
-    // `FINISHED_AFTER_S` is generous to avoid.
-    match row.raw_status.to_ascii_lowercase().as_str() {
-        // 🔴 Never ages. Asymmetric with `idle` on purpose — do not tidy the two thresholds
-        // into one. A blocked session does not resolve itself by being ignored.
-        "waiting" => State::NeedsInput,
-
-        // A brand new agent is `idle`, and `idle` is also how *finished* looks. Without this
-        // arm, opening a tab nags you about the tab you just opened.
-        "idle" if since_start < NEWBORN_S => State::Dormant,
-        "idle" if row.transition_age_s < FINISHED_AFTER_S => State::YourTurn,
-        "idle" => State::Dormant,
-
-        _ => State::Working,
+/// 🔴 Lowercased because `luneta` lowercases: it compares every status with
+/// `eq_ignore_ascii_case`, and its table is the standard for what a status *is*. Matching
+/// exactly here instead would let a hypothetical `Idle` rank second on one surface and last on
+/// the other.
+fn classify(status: &str) -> State {
+    match status.to_ascii_lowercase().as_str() {
+        "waiting" => State::Waiting,
+        "idle" => State::Idle,
+        "busy" => State::Busy,
+        _ => State::Other,
     }
 }
 
 /// Turn a poll into a repaint.
 ///
-/// Ordering is this module's job and nobody else's: `claude-ps` sorts by session, pane and
-/// pid so that two runs a second apart diff cleanly, and says in its README that this order is
-/// for diffing rather than reading. **Actionable first, then oldest first** — within a group,
-/// the row that has been waiting longest is the one that has been ignored longest.
+/// Ordering is this module's job and nobody else's: `claude-ps` sorts by pid so that two runs a
+/// second apart diff cleanly, and says in its README that this order is for diffing rather than
+/// reading.
+///
+/// 🔴 **`luneta`'s order, both halves.** Attention first, by [`State`]'s own `Ord`; and within
+/// one status, **most recent first** — the agent that changed a moment ago is the one you were
+/// just working with, which is a stabler thing to steer by than the one that has been sitting
+/// there longest. ⚠️ That second half is a reversal: this menu used to put the *oldest* row of a
+/// group at the top, on the reasoning that it had been ignored longest. The picker's reasoning
+/// won because the picker is where he actually navigates from, and two surfaces that disagree
+/// about which row is at the top are worse than either rule.
+///
+/// Ties fall back to the producer's pid order, because `sort_by` is stable — so two agents that
+/// changed in the same second do not swap places between polls.
 pub fn snapshot(rows: &[Row], now: u64) -> Snapshot {
     let mut entries: Vec<Entry> = rows
         .iter()
         .map(|row| Entry {
-            state: classify(row, now),
+            state: classify(&row.raw_status),
             raw_status: row.raw_status.clone(),
-            // Provisional. `name_rows` overwrites this with the zellij session; Claude Code's
-            // own label survives only where there is no session to use instead.
-            title: row.name.clone(),
+            // Decided here, in three steps, because it is a function of this row alone. Only
+            // the `:pane` suffix needs the other rows, and that is `name_rows`.
+            title: chosen_name(&row.name, row.name_source.as_deref())
+                .or_else(|| row.zellij.as_ref().map(|z| z.session.clone()))
+                .unwrap_or_else(|| row.name.clone()),
             age_s: row.transition_age_s,
-            context_tokens: row.context.map(|c| c.tokens),
             // One `map`, because the producer nests the pair: there is no state where a
             // session is known and its pane is not, so there is nothing left to agree on here.
             target: row.zellij.as_ref().map(|z| Target {
@@ -308,56 +291,89 @@ pub fn snapshot(rows: &[Row], now: u64) -> Snapshot {
         })
         .collect();
 
-    entries.sort_by(|a, b| a.state.cmp(&b.state).then(b.age_s.cmp(&a.age_s)));
+    entries.sort_by(|a, b| a.state.cmp(&b.state).then(a.age_s.cmp(&b.age_s)));
     name_rows(&mut entries);
 
     let badge = entries.iter().filter(|e| e.state.is_actionable()).count();
-    let blocked = entries.iter().any(|e| e.state == State::NeedsInput);
 
     Snapshot {
         entries,
         badge,
-        blocked,
+        taken_at: now,
     }
 }
 
-/// Name every row by its **zellij session**, and spell out the pane only when that name has
-/// stopped picking one row out of the menu.
+/// The name a **person** chose for this agent, or `None` to fall back to something else.
 ///
-/// 🔴 [[CSB-15]]. Rows used to be named by `Row::name` — Claude Code's own label, which is
-/// the cwd basename plus a two-character suffix. For `…/infra.git/master` that label is
-/// `master-3c`, a string that appears nowhere in how the session is reached: the zellij session
-/// is `infra`. The two were conflated as "the session name"; they are different things, and
-/// only one of them is an address.
+/// 🔴 `claude-ps` reports both the name and **who chose it**, and the second half is the
+/// load-bearing one. A `derived` name is the basename of the cwd plus a suffix, so a row that
+/// showed it would be named after a directory it is only incidentally in. Only `user` and `peer`
+/// are a name that a person or another agent picked.
 ///
-/// The rule is `zj-picker`'s, deliberately copied rather than reinvented — it is the surface
-/// Lorenzo asked this one to resemble. Two parts of it are load-bearing:
+/// 🔴 An unrecognised source is **suppressed**, which is the exact opposite of what [`classify`]
+/// does with an unrecognised status. The asymmetry is the producer's and it is deliberate on both
+/// sides: every value in the status vocabulary is a real state, so hiding one hides a live agent,
+/// whereas the sources that carry a *chosen* name are a short closed list and the machinery is
+/// the long open one — Claude Code already writes `derived`, `collision`, `auto` and `hook`. A
+/// source invented tomorrow is far likelier to be more machinery, and trusting it would put a
+/// generated name where a chosen one belongs, which reads as information and is not.
+///
+/// `None` is trusted, because it is the state before the key existed rather than a source this
+/// build failed to recognise, and an older `claude-ps` should keep working.
+fn chosen_name(name: &str, source: Option<&str>) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let chosen = match source {
+        None => true,
+        Some(source) => source.eq_ignore_ascii_case("user") || source.eq_ignore_ascii_case("peer"),
+    };
+    chosen.then(|| name.to_string())
+}
+
+/// Spell out the pane on every row whose name has stopped picking one row out of the menu.
+///
+/// 🔴 [[CSB-15]] named every row by its **zellij session**, because `Row::name` was Claude Code's
+/// own label — the cwd basename plus a suffix, a string that appears nowhere in how the session
+/// is reached. `name_source` is what put the question back: a name a *person* chose is the only
+/// string on the row that says what the agent is **for**, and it is not the cwd twice over. So
+/// the name is decided in `snapshot`, in the picker's three steps: the chosen name; else the
+/// zellij session; else Claude Code's label, for an agent that has neither and would otherwise
+/// have no name at all. What is left for here is the suffix.
+///
+/// Two parts of it are load-bearing, and both are `luneta`'s:
 ///
 /// - **Ambiguity is judged over the rows that render.** Nothing is hidden from this menu, so
 ///   that is every entry; the suffix therefore appears exactly when the bare name would leave
 ///   two rows looking identical.
-/// - **When a session is shared, *every* one of its rows is suffixed.** "The first one is bare"
+/// - **When a name is shared, *every* one of its rows is suffixed.** "The first one is bare"
 ///   is not a rule anyone could read off the menu.
 ///
-/// An agent outside zellij has no session to be named by, keeps Claude Code's label as the only
-/// identifier it has, and is never suffixed — `-:-` would be worse than the name it replaced.
+/// ⚠️ The suffix needs a pane, so only rows inside zellij can take one. An agent outside it
+/// keeps its bare name — `-:-` would be worse than the collision it announced.
+/// ⚠️ **Every comparison happens before any rename.** Suffixing in the same pass would have the
+/// second row of a pair compare its bare name against the first row's *already suffixed* one,
+/// find no collision, and leave exactly the bare name the suffix was there to disambiguate —
+/// the "first one is bare" rule above, arrived at by accident.
 fn name_rows(entries: &mut [Entry]) {
-    for i in 0..entries.len() {
-        let Some(target) = entries[i].target.clone() else {
-            continue;
-        };
-        let shared = entries.iter().enumerate().any(|(j, other)| {
-            j != i
-                && other
-                    .target
-                    .as_ref()
-                    .is_some_and(|o| o.session == target.session)
-        });
-        entries[i].title = if shared {
-            format!("{}:{}", target.session, target.pane)
-        } else {
-            target.session
-        };
+    let names: Vec<String> = entries.iter().map(|e| e.title.clone()).collect();
+    let shared: Vec<bool> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            entry.target.is_some()
+                && entries
+                    .iter()
+                    .enumerate()
+                    .any(|(j, other)| j != i && other.target.is_some() && names[j] == names[i])
+        })
+        .collect();
+
+    for (entry, shared) in entries.iter_mut().zip(shared) {
+        if shared && let Some(target) = entry.target.as_ref() {
+            entry.title = format!("{}:{}", entry.title, target.pane);
+        }
     }
 }
 
@@ -391,11 +407,11 @@ fn truncate(name: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::{Context, Zellij};
+    use crate::agents::Zellij;
 
     const NOW: u64 = 1_800_000_000;
 
-    fn row(status: &str, transition_age_s: u64, since_start: u64) -> Row {
+    fn row(status: &str, transition_age_s: u64) -> Row {
         Row {
             raw_status: status.into(),
             transition_age_s,
@@ -404,94 +420,85 @@ mod tests {
                 pane: "0".into(),
             }),
             name: "n".into(),
-            context: Some(Context { tokens: 187_953 }),
-            started_at: NOW - since_start,
+            name_source: Some("derived".into()),
         }
     }
 
+    /// 🔴 `luneta`'s rank, and the reason [`State`]'s variants are declared in this order.
     #[test]
-    fn waiting_is_needs_input() {
-        assert_eq!(classify(&row("waiting", 5, 900), NOW), State::NeedsInput);
+    fn the_states_are_the_pickers_four_in_the_pickers_order() {
+        assert_eq!(classify("waiting"), State::Waiting);
+        assert_eq!(classify("idle"), State::Idle);
+        assert_eq!(classify("busy"), State::Busy);
+        assert_eq!(classify("shell"), State::Other);
+
+        assert!(State::Waiting < State::Idle);
+        assert!(State::Idle < State::Busy);
+        assert!(State::Busy < State::Other);
     }
 
-    /// 🔴 The asymmetry, stated as a test so it survives a tidy-up. `your turn` ages out at an
-    /// hour; `needs input` never does, because nothing about being ignored unblocks it.
+    /// The picker compares with `eq_ignore_ascii_case`, so this end has to as well or the same
+    /// word ranks differently on the two surfaces.
     #[test]
-    fn needs_input_never_ages_but_your_turn_does() {
-        let week = 7 * 86_400;
-        assert_eq!(
-            classify(&row("waiting", week, week), NOW),
-            State::NeedsInput
-        );
-        assert_eq!(
-            classify(&row("idle", FINISHED_AFTER_S - 1, week), NOW),
-            State::YourTurn
-        );
-        assert_eq!(
-            classify(&row("idle", FINISHED_AFTER_S, week), NOW),
-            State::Dormant
-        );
-    }
-
-    /// Opening a tab must not nag you about the tab you just opened.
-    #[test]
-    fn a_newborn_idle_session_is_dormant() {
-        assert_eq!(classify(&row("idle", 0, 5), NOW), State::Dormant);
-        assert_eq!(
-            classify(&row("idle", 0, NEWBORN_S + 1), NOW),
-            State::YourTurn
-        );
+    fn a_status_is_read_case_insensitively() {
+        assert_eq!(classify("WAITING"), State::Waiting);
+        assert_eq!(classify("Idle"), State::Idle);
     }
 
     /// The version-skew rule. A status this build has never heard of must land somewhere
-    /// harmless, and `Working` is the only harmless place.
+    /// harmless, and last-and-uncounted is the only harmless place.
     #[test]
-    fn an_unknown_status_is_working_and_never_counted() {
-        for unknown in ["busy", "shell", "compacting", "", "nonsense"] {
-            let s = classify(&row(unknown, 10, 900), NOW);
-            assert_eq!(s, State::Working, "{unknown:?}");
+    fn an_unknown_status_ranks_last_and_is_never_counted() {
+        for unknown in ["shell", "compacting", "", "nonsense"] {
+            let s = classify(unknown);
+            assert_eq!(s, State::Other, "{unknown:?}");
             assert!(!s.is_actionable(), "{unknown:?}");
         }
     }
 
-    /// The invariant the whole applet exists to carry.
+    /// 🔴 `your turn` is gone, and with it the hour-long timeout and the newborn suppression
+    /// that propped it up. A finished turn sorts above a working one and is **not** counted, at
+    /// every age — including a five-second-old session, which used to be filed under `dormant`
+    /// to stop it nagging, and a week-old one, which used to age out of `your turn` to the same
+    /// end. Neither needs a threshold now.
     #[test]
-    fn badge_counts_exactly_the_actionable_rows() {
+    fn an_idle_agent_is_never_counted_at_any_age() {
+        for age in [0, 5, 3_600, 7 * 86_400] {
+            let snap = snapshot(&[row("idle", age)], NOW);
+            assert_eq!(snap.badge, 0, "{age}s");
+            assert_eq!(snap.entries[0].state, State::Idle, "{age}s");
+        }
+    }
+
+    /// The invariant the whole applet carries: the number in the bar is the number of agents
+    /// with a question pending.
+    #[test]
+    fn the_badge_counts_exactly_the_waiting_rows() {
         let rows = [
-            row("waiting", 10, 900),
-            row("idle", 60, 900),
-            row("busy", 60, 900),
-            row("idle", 99_999, 99_999),
+            row("waiting", 10),
+            row("idle", 60),
+            row("busy", 60),
+            row("waiting", 99_999),
+            row("shell", 5),
         ];
         let snap = snapshot(&rows, NOW);
         assert_eq!(snap.badge, 2);
-        assert!(snap.blocked);
-        assert_eq!(snap.entries.len(), 4, "nothing is hidden, only uncounted");
+        assert_eq!(snap.entries.len(), 5, "nothing is hidden, only uncounted");
     }
 
-    /// Dormant rows stay in the list. Ageing out means *stops nagging*, not *is lost* — the
-    /// exact reason an hour-long threshold is safe.
+    /// 🔴 `luneta`'s order, both halves — and the second half is a reversal of what this menu
+    /// used to do. Attention first; then, within one status, **most recent first**.
     #[test]
-    fn dormant_rows_are_listed_not_dropped() {
-        let snap = snapshot(&[row("idle", 99_999, 99_999)], NOW);
-        assert_eq!(snap.badge, 0);
-        assert_eq!(snap.iter(State::Dormant).count(), 1);
-        assert_eq!(
-            snap.badge_text(),
-            "",
-            "a dormant row is uncounted, so the mark stands alone"
-        );
-    }
-
-    #[test]
-    fn actionable_first_then_oldest_first() {
+    fn rows_sort_attention_first_then_most_recent_first() {
         let rows = [
-            row("idle", 100, 900),
-            row("busy", 5, 900),
-            row("waiting", 50, 900),
-            row("idle", 200, 900),
+            row("busy", 10),
+            row("idle", 300),
+            row("waiting", 600),
+            row("shell", 1),
+            row("idle", 30),
+            row("waiting", 60),
         ];
-        let states: Vec<_> = snapshot(&rows, NOW)
+        let states: Vec<(State, u64)> = snapshot(&rows, NOW)
             .entries
             .iter()
             .map(|e| (e.state, e.age_s))
@@ -499,264 +506,160 @@ mod tests {
         assert_eq!(
             states,
             vec![
-                (State::NeedsInput, 50),
-                (State::YourTurn, 200),
-                (State::YourTurn, 100),
-                (State::Working, 5),
+                (State::Waiting, 60),
+                (State::Waiting, 600),
+                (State::Idle, 30),
+                (State::Idle, 300),
+                (State::Busy, 10),
+                (State::Other, 1),
             ]
         );
     }
 
-    /// 🔴 Calm spells **nothing**, not `0`. The mark alone is the calm state; a zero beside it
-    /// is one more number in a bar full of them, and it would have to be read to be dismissed.
+    /// ⚠️ Ties keep the producer's pid order, so two agents that changed in the same second do
+    /// not swap places between one poll and the next.
     #[test]
-    fn calm_spells_nothing_and_otherwise_the_count() {
-        assert_eq!(snapshot(&[], NOW).badge_text(), "");
-        assert_eq!(snapshot(&[row("busy", 60, 900)], NOW).badge_text(), "");
-        assert_eq!(snapshot(&[row("idle", 60, 900)], NOW).badge_text(), "1");
-        assert_eq!(
-            snapshot(&[row("waiting", 60, 900), row("idle", 60, 900)], NOW).badge_text(),
-            "2"
-        );
-    }
-
-    /// *Blocked* rather than merely *finished* is the difference between "nothing is moving"
-    /// and "come back when you can". The count reads the same either way, so `blocked` is what
-    /// the icon colours it by — losing this flag would silently flatten the two.
-    #[test]
-    fn blocked_is_flagged_separately_from_the_count() {
-        assert!(!snapshot(&[row("idle", 60, 900)], NOW).blocked);
-        assert!(snapshot(&[row("waiting", 60, 900), row("idle", 60, 900)], NOW).blocked);
-    }
-
-    /// ⚠️ Absent, not `-` or `0`. A blank would read as "no tokens" where the truth is
-    /// "the producer could not tell", and a zero would be a lie the eye cannot catch.
-    #[test]
-    fn a_row_without_a_token_count_just_omits_it() {
-        let mut r = row("idle", 10, 900);
-        r.context = None;
-        let label = snapshot(&[r], NOW).entries[0].label(0);
-        assert!(label.ends_with("your turn <1m"), "got {label:?}");
-        assert!(!label.contains('k'));
-    }
-
-    #[test]
-    fn a_token_count_trails_the_age() {
-        let label = snapshot(&[row("idle", 10, 900)], NOW).entries[0].label(0);
-        assert!(label.ends_with("your turn <1m   188k"), "got {label:?}");
-    }
-
-    #[test]
-    fn token_counts_round_to_three_figures() {
-        assert_eq!(humanise_tokens(950), "950");
-        // Rounded, not truncated: 187,953 is nearer 188k than 187k.
-        assert_eq!(humanise_tokens(187_953), "188k");
-        assert_eq!(humanise_tokens(1_200_000), "1.2M");
-        // ...and a count that rounds up to a million does not become `1000k`.
-        assert_eq!(humanise_tokens(999_999), "1.0M");
-    }
-
-    #[test]
-    fn an_agent_outside_zellij_has_nowhere_to_jump() {
-        let mut r = row("waiting", 10, 900);
-        r.zellij = None;
-        assert_eq!(snapshot(&[r], NOW).entries[0].target, None);
-    }
-
-    fn agent(zellij: Option<(&str, &str)>, name: &str, age: u64) -> Row {
-        let mut r = row("idle", age, 900);
-        r.zellij = zellij.map(|(session, pane)| Zellij {
-            session: session.into(),
-            pane: pane.into(),
+    fn equal_ages_keep_the_producers_order() {
+        let mut first = row("idle", 42);
+        first.zellij = Some(Zellij {
+            session: "first".into(),
+            pane: "0".into(),
         });
-        r.name = name.into();
-        r
+        let mut second = row("idle", 42);
+        second.zellij = Some(Zellij {
+            session: "second".into(),
+            pane: "0".into(),
+        });
+        let snap = snapshot(&[first, second], NOW);
+        assert_eq!(snap.entries[0].title, "first");
+        assert_eq!(snap.entries[1].title, "second");
     }
 
-    /// 🔴 [[CSB-15]], as a regression test. `master-3c` is Claude Code's own label for an
-    /// agent in `…/infra.git/master`; the session it lives in is `infra`. Naming the row by the
-    /// label put a string on screen that Lorenzo has no way to connect to a session.
+    /// 🔴 The clock moves even when the list does not. The menu is rebuilt from a frozen
+    /// snapshot ten times a second while it is open; without the offset every row would read the
+    /// age it had when `claude-ps` last ran.
     #[test]
-    fn a_row_is_named_by_its_zellij_session_not_by_claude_code_s_label() {
-        let snap = snapshot(&[agent(Some(("infra", "1")), "master-3c", 60)], NOW);
-        assert_eq!(snap.entries[0].title, "infra");
-        assert!(snap.entries[0].label(0).contains("infra"));
-        assert!(
-            !snap.entries[0].label(0).contains("master-3c"),
-            "the cwd basename is not an address"
-        );
+    fn the_age_counts_on_after_the_snapshot_was_taken() {
+        let snap = snapshot(&[row("waiting", 59)], NOW);
+        assert_eq!(snap.since(NOW), 0);
+        assert!(snap.entries[0].label(0, 0).ends_with("<1m"));
+        assert_eq!(snap.since(NOW + 90), 90);
+        assert!(snap.entries[0].label(0, 90).ends_with("2m"));
     }
 
-    /// `zj-picker`'s rule, copied: the pane is spelled out exactly when the bare session name
-    /// has stopped picking one row out — and then on **both** rows, because "the first one is
-    /// bare" is not a rule anyone could read off the menu.
+    /// ⚠️ A clock that goes backwards stops the ages rather than jumping them.
     #[test]
-    fn two_agents_in_one_session_both_spell_out_the_pane() {
-        let rows = [
-            agent(Some(("infra", "1")), "master-3c", 60),
-            agent(Some(("infra", "2")), "hotfix-7a", 30),
-            agent(Some(("nixos", "0")), "nixos-69", 20),
-        ];
-        let titles: Vec<String> = snapshot(&rows, NOW)
-            .entries
-            .iter()
-            .map(|e| e.title.clone())
-            .collect();
-        assert_eq!(titles, vec!["infra:1", "infra:2", "nixos"]);
+    fn a_backwards_clock_reads_as_fresh() {
+        assert_eq!(snapshot(&[row("idle", 10)], NOW).since(NOW - 500), 0);
     }
 
-    /// The suffix is judged against every row in the menu, not against rows of the same state —
-    /// a dormant row and a waiting one that share a session are still two rows reading `infra`.
+    /// The word beside the glyph is the producer's, so a status invented after this was written
+    /// says what it is rather than being translated into one of ours.
     #[test]
-    fn sharing_is_judged_across_the_whole_menu_not_within_one_state() {
-        let mut waiting = agent(Some(("infra", "1")), "master-3c", 10);
-        waiting.raw_status = "waiting".into();
-        let rows = [waiting, agent(Some(("infra", "2")), "hotfix-7a", 99_999)];
-        let snap = snapshot(&rows, NOW);
-        assert_eq!(snap.entries[0].state, State::NeedsInput);
-        assert_eq!(snap.entries[1].state, State::Dormant);
-        assert_eq!(snap.entries[0].title, "infra:1");
-        assert_eq!(snap.entries[1].title, "infra:2");
+    fn the_row_prints_the_status_it_was_given() {
+        let snap = snapshot(&[row("compacting", 120)], NOW);
+        let label = snap.entries[0].label(0, 0);
+        assert!(label.contains("compacting"), "{label}");
+        assert!(label.starts_with(UNKNOWN_GLYPH), "{label}");
     }
 
-    /// Nowhere to jump means nothing to be named by, so Claude Code's label is all there is —
-    /// and two such rows are never suffixed, because `-:-` says less than the label does.
+    /// 🔴 A `derived` name is the cwd basename plus a suffix, so the row is named by its
+    /// address instead.
     #[test]
-    fn an_agent_outside_zellij_keeps_claude_code_s_label() {
-        let rows = [
-            agent(None, "projeto-ponte-55", 60),
-            agent(None, "projeto-ponte-61", 30),
-        ];
-        let titles: Vec<String> = snapshot(&rows, NOW)
-            .entries
-            .iter()
-            .map(|e| e.title.clone())
-            .collect();
-        assert_eq!(titles, vec!["projeto-ponte-55", "projeto-ponte-61"]);
+    fn a_derived_name_loses_to_the_zellij_session() {
+        assert_eq!(snapshot(&[row("idle", 5)], NOW).entries[0].title, "s");
     }
 
-    /// 🔴 Case is `zj-picker`'s rule, not this module's: it compares every status with
-    /// `eq_ignore_ascii_case`, so `classify` does too. The alternative was a status that is
-    /// *recognised* on one surface and *unknown* on the other, which is two mappings again —
-    /// and the unknown side is the uncounted one, so the skew would hide a row rather than
-    /// merely mislabel it.
+    /// 🔴 …and a name a person chose wins, because it is the only string on the row that says
+    /// what the agent is for.
     #[test]
-    fn case_never_decides_what_a_status_is() {
-        for waiting in ["waiting", "WAITING", "Waiting"] {
-            assert_eq!(
-                classify(&row(waiting, 5, 900), NOW),
-                State::NeedsInput,
-                "{waiting}"
-            );
-        }
-        for idle in ["idle", "IDLE", "Idle"] {
-            assert_eq!(
-                classify(&row(idle, 60, 900), NOW),
-                State::YourTurn,
-                "{idle}"
-            );
-        }
-        assert_eq!(
-            entry(State::Working, "BUSY").glyph(0),
-            entry(State::Working, "busy").glyph(0)
-        );
-    }
-
-    fn entry(state: State, raw_status: &str) -> Entry {
-        Entry {
-            state,
-            raw_status: raw_status.into(),
-            title: "infra".into(),
-            age_s: 60,
-            context_tokens: Some(187_953),
-            target: None,
+    fn a_chosen_name_wins_over_the_session() {
+        for source in ["user", "peer", "USER"] {
+            let mut r = row("idle", 5);
+            r.name_source = Some(source.into());
+            assert_eq!(snapshot(&[r], NOW).entries[0].title, "n", "{source}");
         }
     }
 
-    /// 🔴 `zj-picker`'s table — one vocabulary across both surfaces, so an agent read in the
-    /// picker and the same agent read in the tray are not two different pictures. The busy row
-    /// is checked against [`SPINNER`] rather than a literal: its frames are this end's own, for
-    /// the reason on that constant, and what has to hold is that `busy` is the status that spins.
+    /// An absent source is the state before Claude Code recorded one, and is trusted; a source
+    /// this build does not know is suppressed, because the machinery is the long open list.
     #[test]
-    fn the_glyphs_are_zj_pickers_and_nothing_is_added() {
-        assert_eq!(entry(State::NeedsInput, "waiting").glyph(0), "\u{1f64b}");
-        assert_eq!(entry(State::YourTurn, "idle").glyph(0), "\u{2615}");
-        assert_eq!(entry(State::Working, "shell").glyph(0), "\u{1f41a}");
-        assert_eq!(entry(State::Working, "compacting").glyph(0), UNKNOWN_GLYPH);
-        assert!(SPINNER.contains(&entry(State::Working, "busy").glyph(0)));
+    fn an_absent_source_is_trusted_and_an_unknown_one_is_not() {
+        let mut absent = row("idle", 5);
+        absent.name_source = None;
+        assert_eq!(snapshot(&[absent], NOW).entries[0].title, "n");
+
+        let mut unknown = row("idle", 5);
+        unknown.name_source = Some("something-new".into());
+        assert_eq!(snapshot(&[unknown], NOW).entries[0].title, "s");
     }
 
-    /// ⚠️ The state is **not** in the glyph. A row that finished a minute ago and one that aged
-    /// out an hour ago are both `idle` to the producer and both ☕ here; the word beside them and
-    /// the block they sit in are what tell them apart. That is the cost of one vocabulary, and
-    /// it is `zj-picker`'s bargain as much as this one's.
+    /// An agent outside zellij has no session to be named by, so Claude Code's label is the only
+    /// identifier it has left — derived or not.
     #[test]
-    fn the_state_does_not_change_the_picture() {
-        for state in [
-            State::NeedsInput,
-            State::YourTurn,
-            State::Working,
-            State::Dormant,
-        ] {
-            assert_eq!(entry(state, "idle").glyph(0), "\u{2615}", "{state:?}");
-        }
-        let fresh = snapshot(&[row("idle", 60, 900)], NOW);
-        let aged = snapshot(&[row("idle", 99_999, 99_999)], NOW);
-        assert_eq!(fresh.entries[0].state, State::YourTurn);
-        assert_eq!(aged.entries[0].state, State::Dormant);
-        assert_eq!(fresh.entries[0].glyph(0), aged.entries[0].glyph(0));
-        assert_ne!(fresh.entries[0].label(0), aged.entries[0].label(0));
+    fn an_agent_outside_zellij_keeps_the_label_it_has() {
+        let mut r = row("idle", 5);
+        r.zellij = None;
+        let snap = snapshot(&[r], NOW);
+        assert_eq!(snap.entries[0].title, "n");
+        assert_eq!(snap.entries[0].target, None);
     }
 
-    /// The one glyph that moves, and the only one that may — everything else has to be a pure
-    /// function of the row, or a repaint on an animation tick would redraw the whole menu.
+    /// 🔴 When a name is shared, *every* one of its rows is suffixed — "the first one is bare"
+    /// is not a rule anyone could read off the menu.
     #[test]
-    fn only_the_busy_glyph_turns() {
-        let busy = entry(State::Working, "busy");
-        let cycle: Vec<&str> = (0..SPINNER.len() as u64).map(|f| busy.glyph(f)).collect();
-        let distinct: std::collections::HashSet<&&str> = cycle.iter().collect();
-        assert_eq!(distinct.len(), SPINNER.len(), "every frame is its own");
-        assert_eq!(
-            busy.glyph(0),
-            busy.glyph(SPINNER.len() as u64),
-            "the cycle closes"
-        );
-
-        for still in ["waiting", "idle", "shell", "compacting"] {
-            let e = entry(State::Working, still);
-            assert_eq!(e.glyph(0), e.glyph(7), "{still}");
-        }
+    fn a_shared_name_suffixes_every_row_that_has_a_pane() {
+        let mut second = row("idle", 10);
+        second.zellij = Some(Zellij {
+            session: "s".into(),
+            pane: "3".into(),
+        });
+        let snap = snapshot(&[row("idle", 20), second], NOW);
+        let titles: Vec<&str> = snap.entries.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, vec!["s:3", "s:0"]);
     }
 
-    /// ⚠️ The column lines up only if every glyph is the same *width*, and they are not the same
-    /// *length*: an emoji is one char and two columns, a braille cell is one of each. The
-    /// spinner's trailing space is the whole of what closes that gap — this is the test that
-    /// notices when someone tidies it away.
+    /// ⚠️ …and a name that still picks one row out is left alone.
     #[test]
-    fn a_spinner_frame_carries_the_column_an_emoji_gets_for_free() {
-        for frame in SPINNER {
-            assert!(frame.ends_with(' '), "{frame:?}");
-            assert_eq!(frame.chars().count(), 2, "{frame:?}");
-        }
-        for status in ["waiting", "idle", "shell", "compacting"] {
-            let emoji = entry(State::Working, status).glyph(0);
-            assert_eq!(emoji.chars().count(), 1, "{emoji:?} pads itself");
-        }
+    fn a_unique_name_takes_no_suffix() {
+        let mut second = row("idle", 10);
+        second.zellij = Some(Zellij {
+            session: "other".into(),
+            pane: "3".into(),
+        });
+        let snap = snapshot(&[row("idle", 20), second], NOW);
+        let titles: Vec<&str> = snap.entries.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, vec!["other", "s"]);
     }
 
-    /// What the tray asks before deciding a tick is worth a repaint. A shell and an unknown are
-    /// `Working` too, and neither of them moves.
+    /// Only the busy row's glyph moves, and it is the only reason a tick is worth a repaint.
     #[test]
-    fn only_a_busy_row_is_a_reason_to_repaint() {
-        let still = [
-            row("idle", 60, 900),
-            row("shell", 60, 900),
-            row("waiting", 60, 900),
-            row("compacting", 60, 900),
-            row("idle", 99_999, 99_999),
-        ];
-        assert!(!snapshot(&still, NOW).any_spinning());
-        assert!(snapshot(&[row("busy", 60, 900)], NOW).any_spinning());
+    fn only_busy_spins() {
+        let busy = snapshot(&[row("busy", 5)], NOW);
+        assert!(busy.any_spinning());
+        assert_ne!(busy.entries[0].glyph(0), busy.entries[0].glyph(1));
+
+        let idle = snapshot(&[row("idle", 5)], NOW);
+        assert!(!idle.any_spinning());
+        assert_eq!(idle.entries[0].glyph(0), idle.entries[0].glyph(7));
+    }
+
+    /// Calm is the bare mark, not a `0` — a zero is still something to read.
+    #[test]
+    fn a_quiet_badge_is_empty_rather_than_zero() {
+        assert_eq!(snapshot(&[row("idle", 5)], NOW).badge_text(), "");
+        assert_eq!(snapshot(&[row("waiting", 5)], NOW).badge_text(), "1");
+    }
+
+    /// 🔴 The tail has to survive: it is where a `:pane` suffix lives and where two cwd-derived
+    /// names differ.
+    #[test]
+    fn truncation_keeps_the_tail() {
+        assert_eq!(truncate("short", 28), "short");
+        let long = truncate("projeto-ponte-longissimo-nome-55:12", 28);
+        assert_eq!(long.chars().count(), 28);
+        assert!(long.ends_with(":12"), "{long}");
+        assert!(long.contains('\u{2026}'), "{long}");
     }
 
     #[test]
@@ -764,18 +667,8 @@ mod tests {
         assert_eq!(humanise(0), "<1m");
         assert_eq!(humanise(59), "<1m");
         assert_eq!(humanise(60), "1m");
-        assert_eq!(humanise(2_820), "47m");
+        assert_eq!(humanise(3_599), "59m");
         assert_eq!(humanise(3_600), "1h");
         assert_eq!(humanise(86_400), "1d");
-    }
-
-    #[test]
-    fn truncation_keeps_the_suffix_that_tells_two_worktrees_apart() {
-        assert_eq!(truncate("short", 28), "short");
-        let a = truncate("projeto-ponte-with-a-very-long-name-55", 28);
-        let b = truncate("projeto-ponte-with-a-very-long-name-61", 28);
-        assert_eq!(a.chars().count(), 28);
-        assert_ne!(a, b);
-        assert!(a.ends_with("55") && b.ends_with("61"));
     }
 }
