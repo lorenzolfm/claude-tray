@@ -8,7 +8,7 @@
 //!   ✻        nothing wants you                  (the mark, alone)
 //!   ✻ 3      three finished their turn          (count in the mark's own terracotta)
 //!   ✻ 2      at least one is blocked on you     (count in amber)
-//!   ✻ ⊘      claude-agents could not be run     (⊘ in red)
+//!   ✻ ⊘      claude-ps could not be run         (⊘ in red)
 //! ```
 //!
 //! The mark never changes — it is identity, not state. Everything that varies is the badge
@@ -25,7 +25,7 @@
 //!
 //! # Shape
 //!
-//! - [`agents`] shells out to `claude-agents` and parses nine TAB-separated columns. 🔴 It does
+//! - [`agents`] shells out to `claude-ps` and deserialises the JSON array it prints. 🔴 It does
 //!   **not** read `~/.claude/sessions` — one liveness implementation, several consumers, so the
 //!   applet and `zj-picker` cannot disagree about what is alive.
 //! - [`state`] owns the whole mapping from raw status to what is shown, because the thing that
@@ -36,7 +36,7 @@
 //!
 //! # Running
 //!
-//! Needs `claude-agents` on `PATH` and a session bus. Waybar needs no configuration change: a
+//! Needs `claude-ps` on `PATH` and a session bus. Waybar needs no configuration change: a
 //! `tray` module is enough, and this arrives in it like blueman or Telegram.
 
 mod agents;
@@ -56,7 +56,7 @@ use std::time::Duration;
 ///
 /// ⚠️ This is **not** the poll interval, and the two were the same number until the spinner
 /// arrived. See [`TICKS_PER_POLL`]: speeding this up without that divisor would quietly have
-/// taken `claude-agents` from one process every five seconds to ten every second.
+/// taken `claude-ps` from one process every five seconds to ten every second.
 const TICK: Duration = Duration::from_millis(100);
 
 /// Animation ticks per poll, so the producer still runs once every five seconds.

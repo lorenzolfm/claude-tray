@@ -6,7 +6,7 @@ Which Claude Code sessions are waiting on you, in the system tray.
   ✻        nothing wants you                (the Claude mark, alone)
   ✻ 3      three finished their turn        (count in the bar's foreground)
   ✻ 2      at least one is blocked on you   (count in amber)
-  ✻ ⊘      claude-agents could not be run   (⊘ in red)
+  ✻ ⊘      claude-ps could not be run       (⊘ in red)
 ```
 
 **The mark never changes.** It is identity, not state — the same terracotta burst in every
@@ -26,19 +26,34 @@ need input and which have finished without visiting each one. This makes that st
 
 ## It does not read the session registry
 
-🔴 **It shells out to [`claude-agents`](https://github.com/lorenzolfm/claude-agents) and parses
-its TSV.**
+🔴 **It shells out to [`claude-ps`](https://github.com/lorenzolfm/claude-ps) and reads
+the JSON it prints.**
 
 That program already does the pid + `procStart` liveness check that stops a recycled pid from
 passing a dead agent off as live, and already joins each agent to its zellij session and pane.
 Re-deriving any of it here would create a second source that can disagree with the first — and
 `zj-picker` is already the second consumer of the first. One joiner, many consumers.
 
-`claude-agents` is looked up on `PATH`, not pinned, so it can be upgraded underneath the applet.
+`claude-ps` is looked up on `PATH`, not pinned, so it can be upgraded underneath the applet.
+
+## The token count on each row
+
+`claude-ps` reports how much context each agent was carrying at its last assistant turn, and
+each menu row carries it as a trailing `188k`.
+
+⚠️ **Tokens, never a percentage.** The context window *size* is never written to disk — Claude
+Code computes it and hands it to a status line at render time — so a denominator here would have
+to come from a model-name table that goes confidently wrong the day a new model ships. That is
+the same failure this applet avoids by passing `status` through, and worse: an unrecognised
+status renders as itself, while a wrong denominator renders as a number that looks right.
+
+A row whose count is missing simply **omits** it. The producer's join for this one key is a path
+derived from `cwd` rather than a proof, so "not known" is ordinary — and a `0` there would be a
+lie the eye cannot catch.
 
 ## What it decides
 
-`claude-agents` passes `status` through verbatim and tells consumers not to match it against a
+`claude-ps` passes `status` through verbatim and tells consumers not to match it against a
 fixed set. So the mapping lives here, in `src/state.rs`, and nowhere else — it has to be the same
 code that draws the badge and builds the menu, or the count and the list could disagree about the
 same session.
@@ -96,7 +111,7 @@ Three rules are load-bearing and are each pinned by a test:
 The list is a **pure mirror**. There is no dismiss and no unread; opening the menu resets
 nothing. The count is *pending*, always.
 
-Ordering is this program's job: `claude-agents` sorts for clean diffs and says so. Here it is
+Ordering is this program's job: `claude-ps` sorts for clean diffs and says so. Here it is
 **actionable first, then oldest first** — within a group, the row waiting longest is the one
 ignored longest.
 
@@ -122,7 +137,7 @@ Three colours, each meaning exactly one thing:
 | `#D97757` | the mark, always | identity — it never changes |
 | `#fdf6e3` | the count | *n* turns have finished |
 | `#e5c07b` | the count | at least one session is **blocked on you** |
-| `#e06c75` | `⊘` | the applet **cannot see** — `claude-agents` is missing or failing |
+| `#e06c75` | `⊘` | the applet **cannot see** — `claude-ps` is missing or failing |
 
 🔴 **The pixmap used to be monochrome so that colour could live in `style.css`. That reason is
 gone** — see the warning below: a tray item is a `Gtk::Image` and `color` does nothing to it. So
@@ -153,7 +168,7 @@ ignored. Any cue has to be a property of the box.
 nix profile install github:lorenzolfm/claude-tray
 ```
 
-Needs `claude-agents` on `PATH` and a session bus. The mark needs no font — it is rasterised
+Needs `claude-ps` on `PATH` and a session bus. The mark needs no font — it is rasterised
 from the vendored SVG — but the badge does, so the nix package pins one carrying `⊘` and the
 digits via `CLAUDE_TRAY_FONT`; a `cargo` build falls back to fontconfig.
 
@@ -200,8 +215,8 @@ WantedBy=default.target
 
 ⚠️ **On NixOS, set the unit's `PATH` explicitly.** NixOS gives user units a sanitised environment
 holding only coreutils, findutils, grep, sed and systemd — it overrides the user manager's own PATH,
-so both `claude-agents` and `zellij` go missing and the applet shows only `⊘` with a dead jump.
-Neither should be pinned to a store path: `claude-agents` so it stays upgradeable underneath, and
+so both `claude-ps` and `zellij` go missing and the applet shows only `⊘` with a dead jump.
+Neither should be pinned to a store path: `claude-ps` so it stays upgradeable underneath, and
 `zellij` because the jump talks to a **running server** and a different build would speak to it
 wrongly.
 
@@ -232,8 +247,11 @@ Everything below was observed in a real Waybar 0.15.0, not reasoned about.
 
 ## Jumping to a pane
 
-The `pane` column is `$ZELLIJ_PANE_ID`, which is exactly what `zellij action focus-pane-id`
+`zellij.pane` is `$ZELLIJ_PANE_ID`, which is exactly what `zellij action focus-pane-id`
 takes, addressed at a session by name from outside it. So a click is one process spawn.
+
+The producer nests it with `zellij.session` in one object, or emits `null` — so a row either has
+a whole address or none, and there is no half-answer for the jump to guard against.
 
 ⚠️ **It does not raise a window.** Nothing links a Hyprland window to the zellij session running
 inside it, so the honest scope is: whichever terminal is already attached moves to the right

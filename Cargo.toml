@@ -12,6 +12,10 @@ repository = "https://github.com/lorenzolfm/claude-tray"
 # falls through to an `async_io` module that is not built.
 ksni = { version = "0.3", features = ["blocking"] }
 ab_glyph = "0.2"
+# The producer speaks JSON. Deserialising it by name is what keeps a new key from
+# being a breaking change the way an appended column was.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [profile.release]
 strip = true

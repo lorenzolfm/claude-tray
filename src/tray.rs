@@ -68,7 +68,7 @@ impl Animation {
 }
 
 /// What the last poll found. An error is a state the tray *shows*, not a reason to exit —
-/// `claude-agents` missing from `PATH` is the one failure this slice can really have, and a
+/// `claude-ps` missing from `PATH` is the one failure this slice can really have, and a
 /// silent tray would hide exactly the thing the applet exists to make visible.
 enum View {
     Agents(Snapshot),
@@ -340,6 +340,7 @@ mod tests {
             raw_status: "idle".into(),
             title: "infra".into(),
             age_s: 60,
+            context_tokens: Some(187_953),
             target,
         }
     }
