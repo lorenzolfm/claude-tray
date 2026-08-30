@@ -26,8 +26,8 @@ need input and which have finished without visiting each one. This makes that st
 
 ## It does not read the session registry
 
-🔴 **It shells out to [`claude-ps`](https://github.com/lorenzolfm/claude-ps) and parses
-its TSV.**
+🔴 **It shells out to [`claude-ps`](https://github.com/lorenzolfm/claude-ps) and reads
+the JSON it prints.**
 
 That program already does the pid + `procStart` liveness check that stops a recycled pid from
 passing a dead agent off as live, and already joins each agent to its zellij session and pane.
@@ -232,8 +232,11 @@ Everything below was observed in a real Waybar 0.15.0, not reasoned about.
 
 ## Jumping to a pane
 
-The `pane` column is `$ZELLIJ_PANE_ID`, which is exactly what `zellij action focus-pane-id`
+`zellij.pane` is `$ZELLIJ_PANE_ID`, which is exactly what `zellij action focus-pane-id`
 takes, addressed at a session by name from outside it. So a click is one process spawn.
+
+The producer nests it with `zellij.session` in one object, or emits `null` — so a row either has
+a whole address or none, and there is no half-answer for the jump to guard against.
 
 ⚠️ **It does not raise a window.** Nothing links a Hyprland window to the zellij session running
 inside it, so the honest scope is: whichever terminal is already attached moves to the right

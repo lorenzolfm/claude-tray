@@ -271,9 +271,11 @@ pub fn snapshot(rows: &[Row], now: u64) -> Snapshot {
             // own label survives only where there is no session to use instead.
             title: row.name.clone(),
             age_s: row.transition_age_s,
-            target: (row.session != "-" && row.pane != "-").then(|| Target {
-                session: row.session.clone(),
-                pane: row.pane.clone(),
+            // One `map`, because the producer nests the pair: there is no state where a
+            // session is known and its pane is not, so there is nothing left to agree on here.
+            target: row.zellij.as_ref().map(|z| Target {
+                session: z.session.clone(),
+                pane: z.pane.clone(),
             }),
         })
         .collect();
@@ -361,6 +363,7 @@ fn truncate(name: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::Zellij;
 
     const NOW: u64 = 1_800_000_000;
 
@@ -368,8 +371,10 @@ mod tests {
         Row {
             raw_status: status.into(),
             transition_age_s,
-            session: "s".into(),
-            pane: "0".into(),
+            zellij: Some(Zellij {
+                session: "s".into(),
+                pane: "0".into(),
+            }),
             name: "n".into(),
             started_at: NOW - since_start,
         }
@@ -498,15 +503,16 @@ mod tests {
     #[test]
     fn an_agent_outside_zellij_has_nowhere_to_jump() {
         let mut r = row("waiting", 10, 900);
-        r.session = "-".into();
-        r.pane = "-".into();
+        r.zellij = None;
         assert_eq!(snapshot(&[r], NOW).entries[0].target, None);
     }
 
-    fn agent(session: &str, pane: &str, name: &str, age: u64) -> Row {
+    fn agent(zellij: Option<(&str, &str)>, name: &str, age: u64) -> Row {
         let mut r = row("idle", age, 900);
-        r.session = session.into();
-        r.pane = pane.into();
+        r.zellij = zellij.map(|(session, pane)| Zellij {
+            session: session.into(),
+            pane: pane.into(),
+        });
         r.name = name.into();
         r
     }
@@ -516,7 +522,7 @@ mod tests {
     /// label put a string on screen that Lorenzo has no way to connect to a session.
     #[test]
     fn a_row_is_named_by_its_zellij_session_not_by_claude_code_s_label() {
-        let snap = snapshot(&[agent("infra", "1", "master-3c", 60)], NOW);
+        let snap = snapshot(&[agent(Some(("infra", "1")), "master-3c", 60)], NOW);
         assert_eq!(snap.entries[0].title, "infra");
         assert!(snap.entries[0].label(0).contains("infra"));
         assert!(
@@ -531,9 +537,9 @@ mod tests {
     #[test]
     fn two_agents_in_one_session_both_spell_out_the_pane() {
         let rows = [
-            agent("infra", "1", "master-3c", 60),
-            agent("infra", "2", "hotfix-7a", 30),
-            agent("nixos", "0", "nixos-69", 20),
+            agent(Some(("infra", "1")), "master-3c", 60),
+            agent(Some(("infra", "2")), "hotfix-7a", 30),
+            agent(Some(("nixos", "0")), "nixos-69", 20),
         ];
         let titles: Vec<String> = snapshot(&rows, NOW)
             .entries
@@ -547,9 +553,9 @@ mod tests {
     /// a dormant row and a waiting one that share a session are still two rows reading `infra`.
     #[test]
     fn sharing_is_judged_across_the_whole_menu_not_within_one_state() {
-        let mut waiting = agent("infra", "1", "master-3c", 10);
+        let mut waiting = agent(Some(("infra", "1")), "master-3c", 10);
         waiting.raw_status = "waiting".into();
-        let rows = [waiting, agent("infra", "2", "hotfix-7a", 99_999)];
+        let rows = [waiting, agent(Some(("infra", "2")), "hotfix-7a", 99_999)];
         let snap = snapshot(&rows, NOW);
         assert_eq!(snap.entries[0].state, State::NeedsInput);
         assert_eq!(snap.entries[1].state, State::Dormant);
@@ -562,8 +568,8 @@ mod tests {
     #[test]
     fn an_agent_outside_zellij_keeps_claude_code_s_label() {
         let rows = [
-            agent("-", "-", "projeto-ponte-55", 60),
-            agent("-", "-", "projeto-ponte-61", 30),
+            agent(None, "projeto-ponte-55", 60),
+            agent(None, "projeto-ponte-61", 30),
         ];
         let titles: Vec<String> = snapshot(&rows, NOW)
             .entries

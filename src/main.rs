@@ -25,7 +25,7 @@
 //!
 //! # Shape
 //!
-//! - [`agents`] shells out to `claude-ps` and parses nine TAB-separated columns. 🔴 It does
+//! - [`agents`] shells out to `claude-ps` and deserialises the JSON array it prints. 🔴 It does
 //!   **not** read `~/.claude/sessions` — one liveness implementation, several consumers, so the
 //!   applet and `zj-picker` cannot disagree about what is alive.
 //! - [`state`] owns the whole mapping from raw status to what is shown, because the thing that
