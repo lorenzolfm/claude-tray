@@ -308,12 +308,13 @@ fn quit() -> MenuItem<ClaudeTray> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{State, Target};
+    use crate::state::{Status, Target};
 
-    fn entry(state: State, target: Option<Target>) -> Entry {
+    /// A row is built from a status word, as the real one is. There is no way to ask for a row
+    /// that ranks as one status and reads as another.
+    fn entry(status: &str, target: Option<Target>) -> Entry {
         Entry {
-            state,
-            raw_status: "idle".into(),
+            status: Status::parse(status.into()),
             title: "infra".into(),
             age_s: 60,
             target,
@@ -345,8 +346,10 @@ mod tests {
     /// `enabled: false` row insensitive, so this flag controls the jump and not only a colour.
     #[test]
     fn every_state_with_an_address_is_reachable() {
-        for state in [State::Waiting, State::Idle, State::Busy, State::Other] {
-            assert!(enabled(&row(&entry(state, somewhere()), 0, 0)), "{state:?}");
+        // One word for each of the four ranks. `shell` is the fourth, because a status that
+        // this build does not know still gets a row.
+        for status in ["waiting", "idle", "busy", "shell"] {
+            assert!(enabled(&row(&entry(status, somewhere()), 0, 0)), "{status}");
         }
     }
 
@@ -354,15 +357,15 @@ mod tests {
     /// legible and does nothing, instead of a click with no result.
     #[test]
     fn a_row_with_nowhere_to_go_is_inert() {
-        assert!(!enabled(&row(&entry(State::Busy, None), 0, 0)));
+        assert!(!enabled(&row(&entry("busy", None), 0, 0)));
     }
 
     /// The menu rebuilds ten times a second from one snapshot, so the offset must reach the
     /// label or the age column stops with the list.
     #[test]
     fn a_rows_age_counts_on_while_the_menu_is_open() {
-        let fresh = label(&row(&entry(State::Idle, somewhere()), 0, 0));
-        let later = label(&row(&entry(State::Idle, somewhere()), 0, 120));
+        let fresh = label(&row(&entry("idle", somewhere()), 0, 0));
+        let later = label(&row(&entry("idle", somewhere()), 0, 120));
         assert!(fresh.ends_with("idle 1m"), "{fresh}");
         assert!(later.ends_with("idle 3m"), "{later}");
     }

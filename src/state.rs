@@ -5,6 +5,10 @@
 //! consumer must decide. The same code must draw the badge and build the menu, or the count and
 //! the list can disagree about one session.
 //!
+//! One word gives three answers: where the row sorts, which picture it draws, and which word it
+//! prints. [`Status`] holds the three together and reads the word once, so that a row cannot
+//! rank as one status and read as another.
+//!
 //! The decision comes from `luneta`. The two surfaces read the same producer about the same
 //! agents, so a second vocabulary here would make one session two different things. There are
 //! four states, and they are the picker's four: `waiting`, `idle`, `busy`, and all other
@@ -87,6 +91,108 @@ impl State {
     }
 }
 
+/// A status word from the producer, and everything that this build concludes from it.
+///
+/// The word is read once, in [`Status::parse`], and the three answers that follow from it stay
+/// together: the rank, the picture and the word itself. Three separate fields could disagree,
+/// and a row that sorts first, counts in the badge and prints `idle` beside a ☕ is the failure
+/// that this module exists to prevent.
+///
+/// The fields are private for that reason. [`Status::parse`] is the only way to a value, so the
+/// rank and the picture always come from the word that the row shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Status {
+    raw: String,
+    state: State,
+    face: Face,
+}
+
+/// The picture for a status, decided beside the rank.
+///
+/// `Spinner` is the one face that moves, and it is the only reason that an animation tick is
+/// worth a repaint. It is a variant and not a string in the table, because the frame is not
+/// known when the word is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Face {
+    Fixed(&'static str),
+    Spinner,
+}
+
+impl Status {
+    /// Read one status word, and decide the rank and the picture from it together.
+    ///
+    /// The comparison ignores case, because `luneta` compares each status with
+    /// `eq_ignore_ascii_case` and its table is the standard. An exact comparison here would let
+    /// `Idle` sort second on one surface and last on the other.
+    ///
+    /// The picture vocabulary is finer than the rank vocabulary, which is why the two answers
+    /// come from one table instead of one from the other. `shell` has a picture of its own and
+    /// still ranks last, with the words that this build does not know.
+    ///
+    /// The last arm is the important one: an unknown status becomes `Other` with the unknown
+    /// glyph, and the badge never counts `Other`. The status vocabulary is open and changes with
+    /// Claude Code, which added `shell` between two releases, so a new word is only a question
+    /// of time. Last place fails quietly, but a count would make a badge out of a spelling
+    /// error, and a known picture would make a new status look like an old one.
+    pub fn parse(raw: String) -> Self {
+        let (state, face) = match raw.to_ascii_lowercase().as_str() {
+            // A raised hand. This is the status that the applet exists to show, and it is what
+            // the agent does: it asked a question and stopped.
+            "waiting" => (State::Waiting, Face::Fixed("🙋")),
+            // An idle agent has finished and waits for your next instruction, which is why it
+            // sorts before a busy one. A cup shows that better than a 💤.
+            "idle" => (State::Idle, Face::Fixed("☕")),
+            // The one face that moves, because it is the one status that changes without your
+            // help. The spinner shows that without a look at the age column.
+            "busy" => (State::Busy, Face::Spinner),
+            // A shell. It has its own picture and no rank of its own.
+            "shell" => (State::Other, Face::Fixed("🐚")),
+            _ => (State::Other, Face::Fixed(UNKNOWN_GLYPH)),
+        };
+        Self { raw, state, face }
+    }
+
+    /// Where a row with this status sorts, and whether the badge counts it.
+    pub fn state(&self) -> State {
+        self.state
+    }
+
+    /// The word from the producer, unchanged, for the menu to print beside the picture.
+    ///
+    /// The word comes from the producer and not from [`State`]. `luneta` prints the status that
+    /// it receives. A translation to a local word would show `working` for a status added after
+    /// this code, which would claim knowledge of a state that this build has not seen.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// The picture for this status.
+    ///
+    /// The producer's word selected it, in [`Status::parse`], and `luneta`'s agents tab is the
+    /// standard. The [`State`] value does not select it. A choice by state would give the same
+    /// agent two different pictures on the two surfaces, and it would lose the picture for
+    /// `shell`, which ranks with the words that this build does not know.
+    ///
+    /// `frame` is the animation tick, and it changes one picture only: the busy spinner. Each
+    /// other status gives the same string in each frame, so a repaint at a tick changes only the
+    /// rows that turn.
+    pub fn glyph(&self, frame: u64) -> &'static str {
+        match self.face {
+            Face::Fixed(glyph) => glyph,
+            Face::Spinner => SPINNER[(frame as usize) % SPINNER.len()],
+        }
+    }
+
+    /// Does the picture on this row move, and is a tick thus worth a repaint?
+    ///
+    /// The caller asks before it renders, so this is a question of cost and not of correctness.
+    /// The answer cannot differ from [`Status::glyph`], because both read the same [`Face`]: a
+    /// status that reports a spinner draws one, and a status that draws one reports it.
+    pub fn is_spinning(&self) -> bool {
+        matches!(self.face, Face::Spinner)
+    }
+}
+
 /// Where a row points. `None` when the agent is not in zellij, so there is no destination.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
@@ -97,14 +203,9 @@ pub struct Target {
 /// One menu row, ready to render.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
-    pub state: State,
-    /// The value from the producer, unchanged. [`Entry::glyph`] selects the picture from it,
-    /// and the menu prints it beside that picture.
-    ///
-    /// The word comes from the producer and not from [`State`]. `luneta` prints the status that
-    /// it receives. A translation to a local word would show `working` for a status added after
-    /// this code, which would claim knowledge of a state that this build has not seen.
-    pub raw_status: String,
+    /// What the producer said about this agent, and what this build concluded from it: the
+    /// rank, the picture and the word. They were decided together, so they cannot disagree.
+    pub status: Status,
     /// What this row calls the agent: the name that a person chose, or the zellij session that
     /// holds it if no person chose a name. [`name_rows`] completes this, because a name is only
     /// sufficient in comparison with the other rows in the same menu.
@@ -116,43 +217,6 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// The picture on this row.
-    ///
-    /// The producer's word selects the picture, and `luneta`'s agents tab is the standard. The
-    /// [`State`] value does not select it. A choice by state would give the same agent two
-    /// different pictures on the two surfaces. The table below is `luneta`'s `agents::glyph`,
-    /// including the comparison without case. The [`SPINNER`] frames are the one exception, and
-    /// they are heavier and not different.
-    ///
-    /// `frame` is the animation tick, and it changes one glyph only: the busy spinner. Each
-    /// other status gives the same string in each frame, so a repaint at a tick changes only the
-    /// rows that turn.
-    pub fn glyph(&self, frame: u64) -> &'static str {
-        match self.raw_status.to_ascii_lowercase().as_str() {
-            // A raised hand. This is the status that the applet exists to show, and it is what
-            // the agent does: it asked a question and stopped.
-            "waiting" => "🙋",
-            // An idle agent has finished and waits for your next instruction, which is why it
-            // sorts before a busy one. A cup shows that better than a 💤.
-            "idle" => "☕",
-            // The one glyph that moves, because it is the one status that changes without your
-            // help. The spinner shows that without a look at the age column.
-            "busy" => SPINNER[(frame as usize) % SPINNER.len()],
-            // A shell.
-            "shell" => "🐚",
-            _ => UNKNOWN_GLYPH,
-        }
-    }
-
-    /// Does the glyph on this row move, and is a tick thus worth a repaint?
-    ///
-    /// The caller asks before it renders, so this is a question of cost and not of correctness.
-    /// A wrong answer for an unknown word gives a spinner that does not turn. The comparison is
-    /// therefore the same one that [`Entry::glyph`] makes.
-    pub fn is_spinning(&self) -> bool {
-        self.raw_status.eq_ignore_ascii_case("busy")
-    }
-
     /// One row: `glyph · title · status age`.
     ///
     /// Each row shows an age, and a busy row shows one too. On a busy row the age is the
@@ -167,9 +231,9 @@ impl Entry {
     pub fn label(&self, frame: u64, since: u64) -> String {
         format!(
             "{}  {:<width$}  {} {}",
-            self.glyph(frame),
+            self.status.glyph(frame),
             truncate(&self.title, NAME_WIDTH),
-            self.raw_status,
+            self.status.as_str(),
             humanise(self.age_s.saturating_add(since)),
             width = NAME_WIDTH,
         )
@@ -207,28 +271,13 @@ impl Snapshot {
     /// The test covers each row, because the menu draws each row. There is no scroll window that
     /// could make this answer wrong.
     pub fn any_spinning(&self) -> bool {
-        self.entries.iter().any(Entry::is_spinning)
+        self.entries.iter().any(|entry| entry.status.is_spinning())
     }
 
     /// The age of this snapshot, in seconds. A clock that moves backwards gives an age of zero,
     /// so the ages stop instead of jumping.
     pub fn since(&self, now: u64) -> u64 {
         now.saturating_sub(self.taken_at)
-    }
-}
-
-/// Classify one row, which decides only where the row sorts. The word beside the glyph comes
-/// from the producer.
-///
-/// The comparison ignores case, because `luneta` compares each status with
-/// `eq_ignore_ascii_case` and its table is the standard. An exact comparison here would let
-/// `Idle` sort second on one surface and last on the other.
-fn classify(status: &str) -> State {
-    match status.to_ascii_lowercase().as_str() {
-        "waiting" => State::Waiting,
-        "idle" => State::Idle,
-        "busy" => State::Busy,
-        _ => State::Other,
     }
 }
 
@@ -248,8 +297,7 @@ pub fn snapshot(rows: &[Row], now: u64) -> Snapshot {
     let mut entries: Vec<Entry> = rows
         .iter()
         .map(|row| Entry {
-            state: classify(&row.raw_status),
-            raw_status: row.raw_status.clone(),
+            status: Status::parse(row.raw_status.clone()),
             // Decided here, in three steps, because it depends on this row alone. Only the
             // `:pane` suffix needs the other rows, and `name_rows` adds it.
             title: chosen_name(&row.name, row.name_source.as_deref())
@@ -265,10 +313,18 @@ pub fn snapshot(rows: &[Row], now: u64) -> Snapshot {
         })
         .collect();
 
-    entries.sort_by(|a, b| a.state.cmp(&b.state).then(a.age_s.cmp(&b.age_s)));
+    entries.sort_by(|a, b| {
+        a.status
+            .state()
+            .cmp(&b.status.state())
+            .then(a.age_s.cmp(&b.age_s))
+    });
     name_rows(&mut entries);
 
-    let badge = entries.iter().filter(|e| e.state.is_actionable()).count();
+    let badge = entries
+        .iter()
+        .filter(|e| e.status.state().is_actionable())
+        .count();
 
     Snapshot {
         entries,
@@ -284,8 +340,8 @@ pub fn snapshot(rows: &[Row], now: u64) -> Snapshot {
 /// the name of a directory that holds it by chance. Only `user` and `peer` mean that a person or
 /// another agent chose the name.
 ///
-/// An unknown source is suppressed, which is the opposite of what [`classify`] does with an
-/// unknown status. The producer causes that difference, and it is correct on both sides. Each
+/// An unknown source is suppressed, which is the opposite of what [`Status::parse`] does with
+/// an unknown status. The producer causes that difference, and it is correct on both sides. Each
 /// value in the status vocabulary is a real state, so a hidden value hides a live agent. But the
 /// sources that carry a chosen name are a short closed list, and the sources that carry a
 /// generated name are a long open one: Claude Code already writes `derived`, `collision`, `auto`
@@ -380,6 +436,12 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000;
 
+    /// Where one status word ranks. The rank is now one of three answers that
+    /// [`Status::parse`] gives, and the tests below ask for it alone.
+    fn rank(status: &str) -> State {
+        Status::parse(status.into()).state()
+    }
+
     fn row(status: &str, transition_age_s: u64) -> Row {
         Row {
             raw_status: status.into(),
@@ -396,10 +458,10 @@ mod tests {
     /// `luneta`'s rank, and the reason for the order of [`State`]'s variants.
     #[test]
     fn the_states_rank_in_the_pickers_order() {
-        assert_eq!(classify("waiting"), State::Waiting);
-        assert_eq!(classify("idle"), State::Idle);
-        assert_eq!(classify("busy"), State::Busy);
-        assert_eq!(classify("shell"), State::Other);
+        assert_eq!(rank("waiting"), State::Waiting);
+        assert_eq!(rank("idle"), State::Idle);
+        assert_eq!(rank("busy"), State::Busy);
+        assert_eq!(rank("shell"), State::Other);
 
         assert!(State::Waiting < State::Idle);
         assert!(State::Idle < State::Busy);
@@ -410,8 +472,8 @@ mod tests {
     /// word ranks differently on the two surfaces.
     #[test]
     fn a_status_is_read_case_insensitively() {
-        assert_eq!(classify("WAITING"), State::Waiting);
-        assert_eq!(classify("Idle"), State::Idle);
+        assert_eq!(rank("WAITING"), State::Waiting);
+        assert_eq!(rank("Idle"), State::Idle);
     }
 
     /// The rule for a difference of versions. A status that this build does not know must go
@@ -419,7 +481,7 @@ mod tests {
     #[test]
     fn an_unknown_status_ranks_last_and_is_never_counted() {
         for unknown in ["shell", "compacting", "", "nonsense"] {
-            let s = classify(unknown);
+            let s = rank(unknown);
             assert_eq!(s, State::Other, "{unknown:?}");
             assert!(!s.is_actionable(), "{unknown:?}");
         }
@@ -433,7 +495,7 @@ mod tests {
         for age in [0, 5, 3_600, 7 * 86_400] {
             let snap = snapshot(&[row("idle", age)], NOW);
             assert_eq!(snap.badge, 0, "{age}s");
-            assert_eq!(snap.entries[0].state, State::Idle, "{age}s");
+            assert_eq!(snap.entries[0].status.state(), State::Idle, "{age}s");
         }
     }
 
@@ -468,7 +530,7 @@ mod tests {
         let states: Vec<(State, u64)> = snapshot(&rows, NOW)
             .entries
             .iter()
-            .map(|e| (e.state, e.age_s))
+            .map(|e| (e.status.state(), e.age_s))
             .collect();
         assert_eq!(
             states,
@@ -528,6 +590,22 @@ mod tests {
         let label = snap.entries[0].label(0, 0);
         assert!(label.contains("compacting"), "{label}");
         assert!(label.starts_with(UNKNOWN_GLYPH), "{label}");
+    }
+
+    /// The picture vocabulary is finer than the rank vocabulary, so a rank cannot select a
+    /// picture. `shell` has a picture of its own on both surfaces and still ranks last, and a
+    /// build that derived the one from the other would draw it as a word it does not know.
+    #[test]
+    fn a_shell_has_its_own_picture_and_no_rank_of_its_own() {
+        let snap = snapshot(&[row("shell", 5)], NOW);
+        let entry = &snap.entries[0];
+        assert_eq!(entry.status.state(), State::Other);
+        assert_eq!(entry.status.glyph(0), "🐚");
+        assert_eq!(
+            entry.status.glyph(0),
+            entry.status.glyph(4),
+            "a shell does not turn"
+        );
     }
 
     /// A `derived` name is the cwd basename plus a suffix, so the row takes the name of its
@@ -605,11 +683,17 @@ mod tests {
     fn only_busy_spins() {
         let busy = snapshot(&[row("busy", 5)], NOW);
         assert!(busy.any_spinning());
-        assert_ne!(busy.entries[0].glyph(0), busy.entries[0].glyph(1));
+        assert_ne!(
+            busy.entries[0].status.glyph(0),
+            busy.entries[0].status.glyph(1)
+        );
 
         let idle = snapshot(&[row("idle", 5)], NOW);
         assert!(!idle.any_spinning());
-        assert_eq!(idle.entries[0].glyph(0), idle.entries[0].glyph(7));
+        assert_eq!(
+            idle.entries[0].status.glyph(0),
+            idle.entries[0].status.glyph(7)
+        );
     }
 
     /// The quiet state is the mark alone and not a `0`, because a zero is still something to
