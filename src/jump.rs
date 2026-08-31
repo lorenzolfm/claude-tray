@@ -1,155 +1,150 @@
-//! Clicking a row puts Lorenzo in front of that agent's zellij session.
+//! A click on a row moves you to that agent's zellij session.
 //!
 //! # One terminal, many sessions
 //!
-//! 🎯 **He runs exactly one terminal and switches zellij sessions inside it** — his words, and
-//! the correction [[CSB-17]] is built on. [[CSB-16]] assumed a window *per session*, so it
-//! reached for a new terminal whenever it could not find one showing the target. The right shape
-//! is the other way round: **retarget the terminal he already has, and open one only when there
-//! is none at all.** There is no which-window rule here because there is nothing to arbitrate.
+//! There is one terminal, and the person changes zellij sessions inside it. The rule is thus to
+//! change the session in the terminal that already exists, and to open a terminal only if there
+//! is none. An earlier design assumed one window for each session and opened a new terminal when
+//! no window showed the target. There is no rule here to select between windows, because there
+//! is nothing to select.
 //!
-//! # Why a client's own `argv` cannot be trusted
+//! # Why the `argv` of a client is not sufficient
 //!
-//! 🔴 **A zellij client's `argv` names the session it *originally attached to*, not the one it is
-//! *currently showing*.** CSB-16 matched on argv, a value that goes stale the moment he switches
-//! sessions — his normal way of working — and that one stale string produced both symptoms he
-//! reported: clicking the argv's session raised a terminal displaying something else, and
-//! clicking the session actually on screen matched nothing and spawned a duplicate beside it.
+//! The `argv` of a zellij client names the session that it attached to first, not the session
+//! that it shows now. A match on argv thus uses a value that becomes wrong as soon as the person
+//! changes session, which is the usual way to work. That one value caused two failures: a click
+//! on the session in the argv raised a terminal that showed another session, and a click on the
+//! session on screen matched nothing and opened a second terminal.
 //!
-//! **The live session comes from the socket instead.** A client is connected to exactly one
-//! `zellij --server <path>/<session>` process, so pairing the two ends of that socket names the
-//! session as fact. ⚠️ `/proc/net/unix` does not expose the peer inode — only `ss` does, through
-//! sock_diag netlink — which is why this module shells out for it.
+//! The live session comes from the socket instead. A client connects to exactly one
+//! `zellij --server <path>/<session>` process, so a pair of the two ends of that socket gives the
+//! session. `/proc/net/unix` does not give the peer inode, and only `ss` does, over sock_diag
+//! netlink. This module therefore runs `ss`.
 //!
-//! ⚠️ **Title-matching stays rejected**, and CSB-17 found a fresh reason on top of the old one:
-//! after a session switch the terminal's title kept naming the *previous* session until something
-//! redrew it. It is a display string.
+//! A match on the window title is also not sufficient. After a change of session, the title of
+//! the terminal continues to name the previous session until something draws it again. It is a
+//! display string.
 //!
-//! # Why the switch is verified rather than assumed
+//! # Why this code verifies the change of session
 //!
-//! 🔴 **`zellij action switch-session` is delivered to the *last client that pressed a key* in
-//! that session.** A CLI action carries no client id, so the server picks one — `route.rs` falls
-//! back to `get_last_active_client()`, and when no client has typed there it hands the action to
-//! the throwaway CLI client, which exits. The switch then silently does nothing, and there is no
-//! CLI flag to name a client.
+//! zellij sends `zellij action switch-session` to the last client that pressed a key in that
+//! session. A CLI action carries no client id, so the server selects one: `route.rs` calls
+//! `get_last_active_client()`. If no client has typed there, the server sends the action to the
+//! temporary CLI client, which then exits. The change of session thus does nothing, and there is
+//! no CLI option to name a client.
 //!
-//! ⚠️ **This is not a rare corner — it was the very first thing the live test hit.** He arrives at
-//! a session by *switching* to it with `luneta`, and a client that switched in has pressed no
-//! key in its new session. So on his own workflow the terminal is regularly unwakeable, and a
-//! click that only tried `switch-session` would have gone on opening the duplicate window he
-//! complained about.
+//! This is not a rare condition. A person arrives at a session by a change of session with
+//! `luneta`, and a client that arrived in that way has pressed no key in its new session. The
+//! terminal is thus regularly unable to receive the action, and a click that only tried
+//! `switch-session` would open a second window.
 //!
-//! So the terminal is **woken** with a keystroke it will actually register, and only then asked to
-//! switch. The move is still **checked** — the client's live session is read back — and only if it
-//! never arrives does a terminal get opened. **Every row still lands**, which was Lorenzo's whole
-//! reason for choosing raise-or-attach in CSB-16.
+//! This code therefore sends a keystroke that the client registers, and only then asks for the
+//! change of session. It then verifies the change: it reads the live session of the client
+//! again. It opens a terminal only if the client never arrives. Each row thus reaches its agent.
 //!
-//! # Why the wake is unconditional
+//! # Why the keystroke is unconditional
 //!
-//! 🔴 **[[CSB-19]]: waking only when zellij refused cost a second on every click**, because
-//! finding out that it refused *is* a timeout. CSB-17 tried the switch first and woke only on
-//! refusal, which reads as thrifty and is not: on the common path that first switch **cannot**
-//! succeed — he arrives at sessions by switching, so the client has typed nothing there — so it
-//! burned the whole `SWITCH_DEADLINE` before the wake even started. That was the ~1.2 s he felt.
+//! A keystroke only after a refusal costs one second at each click, because the refusal is a
+//! timeout. An earlier design tried the change first and sent the keystroke only after a
+//! refusal. On the usual path that first change cannot succeed, because the person arrives at a
+//! session by a change of session and the client has typed nothing there. That design thus used
+//! the full `SWITCH_DEADLINE` before the keystroke, which was about 1.2 s.
 //!
-//! ⚠️ **There is nothing to learn by asking first.** Measured on the box: a switch that is going
-//! to succeed is visible in **39–65 ms** over 20 trials, and one that is going to be ignored is
-//! *never* visible — still unmoved 3.2 s on. The speculative call buys no information the wake
-//! does not make moot.
+//! There is also nothing to learn from an attempt first. Measured on this machine: a change that
+//! succeeds is visible in 39–65 ms over 20 trials, and a change that is ignored is never
+//! visible, even 3.2 s later.
 //!
-//! Waking costs ~130 ms unconditionally, and the `Ctrl e` pair is invisible in his config. 🔴
-//! **His call**, taken again with the numbers in hand: ~1.2 s → ~0.2 s, for a keystroke nobody
-//! sees on the clicks that would have worked anyway.
+//! The keystroke costs about 130 ms in each case, and the `Ctrl e` pair is invisible in this
+//! configuration. The result is about 0.2 s instead of about 1.2 s, for a keystroke that nobody
+//! sees on the clicks that would have succeeded.
 //!
-//! # Why the compositor handle is found rather than inherited
+//! # Why this code finds the compositor handle
 //!
-//! 🔴 **`hyprctl` needs `HYPRLAND_INSTANCE_SIGNATURE`, and this applet is started before
-//! there is one.** systemd brings the user session up at boot and Hyprland is an ordinary
-//! process inside it, so the unit's environment is fixed *before* the compositor exists and
-//! never learns the signature — an `import-environment` would have to run after the applet
-//! rather than before it. Every `hyprctl` call then failed and every click died in
-//! [`terminals`], one line into a jump, with no window ever raised.
+//! `hyprctl` needs `HYPRLAND_INSTANCE_SIGNATURE`, and this applet starts before that value
+//! exists. systemd starts the user session at boot, and Hyprland is a process inside it. The
+//! environment of the unit is thus fixed before the compositor exists and never receives the
+//! signature. An `import-environment` would have to run after the applet and not before it.
+//! Without a solution, each `hyprctl` call failed, and each click stopped in [`terminals`] with
+//! no window raised.
 //!
-//! ⚠️ **And it failed quietly, which is why it took the journal to find.** `hyprctl`
-//! prints `HYPRLAND_INSTANCE_SIGNATURE not set!` **on stdout** and exits **0**: the exit code
-//! says success and the answer is prose. That is why nothing in this module reads an exit code
-//! from it — every call matches on what came back instead, and prose is not a window list.
-//! See [`hyprctl`], which resolves the signature off the runtime directory when the environment
-//! cannot supply it.
+//! That failure was also silent. `hyprctl` prints `HYPRLAND_INSTANCE_SIGNATURE not set!` on
+//! stdout and exits 0: the exit code reports success, and the answer is text. No code in this
+//! module thus reads an exit code from it. Each call examines the output instead, and text is
+//! not a window list. See [`hyprctl`], which finds the signature in the runtime directory when
+//! the environment does not supply it.
 
 use crate::state::Target;
 use std::collections::HashMap;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-/// The terminal opened for a session nothing is currently showing.
+/// The terminal to open for a session that no window shows.
 ///
-/// Hardcoded on purpose: the map scopes this slice to the nixos box alone, and this is the
-/// terminal on it. A second knob here would be a config surface with one possible value.
+/// This value is fixed on purpose. This program runs on one machine, and this is the terminal on
+/// it. An option here would be a configuration item with one possible value.
 const TERMINAL: &str = "ghostty";
 
-/// How far up a process tree to look for the terminal window. A client sits three or four hops
-/// under it; the bound is only here so a `/proc` that lies cannot spin us forever.
+/// How far to go up a process tree to find the terminal window. A client is three or four steps
+/// below it. This limit prevents an infinite loop if `/proc` gives wrong data.
 const MAX_ANCESTRY: usize = 32;
 
-/// How long to wait for a switched client to turn up in its new session before giving up and
-/// opening a terminal instead.
+/// How long to wait for a client to appear in its new session before this code opens a terminal
+/// instead.
 ///
-/// **A switch that is going to happen lands in 39–65 ms** — 20 trials against a woken lab client,
-/// [[CSB-19]] — so this is some fifteen times the worst case observed.
+/// A change of session that succeeds completes in 39–65 ms, over 20 trials against a client that
+/// had received a keystroke. This limit is thus about fifteen times the worst measured value.
 ///
-/// ⚠️ **Keep the slack.** Under CSB-17 a premature expiry here was harmless, because the wake and
-/// a second attempt sat behind it. Since CSB-19 the wake comes *first* and there is nothing
-/// behind this: expiring means `retarget` gives up and `focus` opens the duplicate window CSB-16
-/// and CSB-17 exist to prevent. It is never paid on a click that works, so the generosity is free.
+/// Keep the limit high. The keystroke comes first and there is no second attempt after this
+/// wait, so an early expiry makes `retarget` stop and `focus` open a second window. A click that
+/// succeeds never waits for the full limit, so the high value costs nothing.
 const SWITCH_DEADLINE: Duration = Duration::from_millis(1000);
 
-/// How often to re-read the client's live session while waiting. Each poll is one `ss` run.
+/// How often to read the live session of the client during the wait. Each poll runs `ss` one
+/// time.
 const SWITCH_POLL: Duration = Duration::from_millis(50);
 
-/// The keystroke that wakes a terminal's client: **`Ctrl e`**, sent twice.
+/// The keystroke that makes a client of a terminal active: `Ctrl e`, sent two times.
 ///
-/// 🔴 **It has to be a key zellij *consumes*, or the pane sees it.** `Ctrl e` toggles locked mode
-/// in his config from every mode including locked, so a pair of them is a round trip that leaves
-/// the mode exactly as it was and never reaches the program in the pane. Verified against his
-/// running terminal with Claude Code in the focused pane.
+/// zellij must consume the key, or the pane receives it. In this configuration, `Ctrl e` toggles
+/// locked mode from each mode, including locked mode. Two of them thus return the mode to its
+/// initial value and never reach the program in the pane. This was verified against a running
+/// terminal with Claude Code in the focused pane.
 ///
-/// Hardcoded for the same reason `TERMINAL` is — one box, one config. ⚠️ If that binding ever
-/// goes away this stops being invisible: a bare `^E` would reach the pane instead.
+/// This value is fixed for the same reason as `TERMINAL`: one machine, one configuration. If
+/// that key binding is removed, the keystroke becomes visible, because a plain `^E` then reaches
+/// the pane.
 const WAKE_KEY: &str = "e";
 
-/// The modifier the wake key is held with, as `hl.dsp.send_shortcut` spells it.
+/// The modifier for the key above, in the form that `hl.dsp.send_shortcut` needs.
 ///
-/// 🔴 **It has to be the modifier's *name*, not Hyprland's numeric modmask.** `mods=4` — the
-/// mask `hyprctl dispatch sendshortcut` takes — is accepted by the Lua dispatcher without a
-/// word of complaint and then silently dropped: the window receives `0x65`, a bare `e`, exactly
-/// as it does for `mods=0`. `mods="CTRL"` delivers `0x05`. Measured against a ghostty in raw
-/// mode, one dispatch per encoding.
+/// This must be the name of the modifier and not Hyprland's numeric mask. The Lua dispatcher
+/// accepts `mods=4`, which is the mask that `hyprctl dispatch sendshortcut` takes, and then
+/// removes it: the window receives `0x65`, a plain `e`, as it does for `mods=0`. `mods="CTRL"`
+/// delivers `0x05`. This was measured against a ghostty in raw mode, with one dispatch for each
+/// form.
 ///
-/// ⚠️ That is what made every click type `ee` into the focused pane. A bare `e` is not bound in
-/// zellij, so nothing consumed it and both wake keys reached the program in the pane — the one
-/// failure mode `WAKE_KEY`'s note says to watch for, arriving through the modifier rather than
-/// through a lost binding.
+/// A wrong value here made each click type `ee` into the focused pane. zellij has no binding for
+/// a plain `e`, so nothing consumed it and both keys reached the program in the pane.
 const WAKE_MODS: &str = "CTRL";
 
-/// Long enough for zellij to have taken the first key before the second arrives.
+/// Sufficient time for zellij to accept the first key before the second key arrives.
 const WAKE_GAP: Duration = Duration::from_millis(60);
 
-/// A terminal window with a zellij client in it, and the session that client is **showing**.
+/// A terminal window with a zellij client in it, and the session that the client shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Terminal {
     /// The `zellij` client process inside the window.
     client: u32,
-    /// The session it is displaying *now*, resolved from its socket peer — never from its argv.
+    /// The session that it shows now, from its socket peer and never from its argv.
     session: String,
-    /// The pid the compositor knows this window by, found by walking the client's ancestry.
+    /// The pid that the compositor uses for this window, found in the parents of the client.
     window: u32,
 }
 
-/// Fire the jump and return what to say if it failed.
+/// Do the jump, and return a message if it fails.
 ///
-/// Deliberately not fatal. A tray applet that dies because a session went away between the poll
-/// and the click is a worse tool than one that shrugs and repaints.
+/// A failure here is not fatal on purpose. A tray applet that stops because a session ended
+/// between the poll and the click is worse than one that continues and repaints.
 pub fn focus(target: &Target) -> Result<(), String> {
     let terminals = terminals()?;
 
@@ -161,8 +156,8 @@ pub fn focus(target: &Target) -> Result<(), String> {
         }
     }
 
-    // Showing something else: retarget it in place. 🔴 `--pane-id` makes this one call — the
-    // session change and the pane landing together — so there is no frame in which he could see
+    // The terminal shows another session, so change the session in it. `--pane-id` makes this
+    // one call, with the change of session and the change of pane together, so no frame shows
     // the wrong pane.
     if let Some(t) = terminals.iter().find(|t| t.session != target.session)
         && retarget(t, target)?
@@ -175,13 +170,13 @@ pub fn focus(target: &Target) -> Result<(), String> {
     attach(&target.session)
 }
 
-/// Every terminal window on this box that has a zellij client in it.
+/// Each terminal window on this machine that holds a zellij client.
 ///
-/// The join is three facts, none of them a guess: `/proc` says which processes are clients, the
-/// socket says which session each one is showing, and the compositor says which pids own windows.
-/// A client failing any of the three — a server, our own `action` spawn, an SSH client with no
-/// window here — is simply absent from the list, which is the correct answer rather than a
-/// failure.
+/// The join uses three sources of data. `/proc` gives the processes that are clients, the socket
+/// gives the session that each client shows, and the compositor gives the pids that own windows.
+/// A client that fails one of the three tests is absent from the list, which is the correct
+/// result. Examples are a server, an `action` process from this module, and an SSH client with
+/// no window here.
 fn terminals() -> Result<Vec<Terminal>, String> {
     let windows = window_pids()?;
     let live = live_sessions()?;
@@ -197,12 +192,12 @@ fn terminals() -> Result<Vec<Terminal>, String> {
         .collect())
 }
 
-/// Step one, when a terminal is already showing the session: move that session's focus to the
-/// agent's pane.
+/// Step one, when a terminal already shows the session: move the focus of that session to the
+/// pane of the agent.
 ///
-/// Cheap and almost always redundant — the agent's pane is already the focused one — but not
-/// always: a session he left on a different pane does need this, and it has to happen *before*
-/// the window comes up so he never sees the wrong pane flash.
+/// This is cheap and usually unnecessary, because the pane of the agent already has the focus.
+/// But a session that the person left on a different pane needs it. It must occur before the
+/// window comes to the front, so that no frame shows the wrong pane.
 fn focus_pane(target: &Target) -> Result<(), String> {
     let out = zellij()
         .args(["--session", &target.session, "action", "focus-pane-id"])
@@ -219,14 +214,14 @@ fn focus_pane(target: &Target) -> Result<(), String> {
     .map_err(|why| format!("focus {}:{} failed: {why}", target.session, target.pane))
 }
 
-/// Read zellij's answer to `focus-pane-id`. Split out because the three cases are not obvious
-/// and each one was observed rather than assumed:
+/// Read the answer of zellij to `focus-pane-id`. This is a separate function because the three
+/// conditions are not obvious, and each one was measured:
 ///
-/// - a real focus exits **0**, silent on both streams;
-/// - **`already focused` exits 2** — an error code for the case where the primitive did
-///   everything it could, so it has to be read as success or every click logs a failure;
-/// - a session that has gone away exits **0** and prints the live session list on stdout, which
-///   is why silence rather than the exit code is what success is matched on.
+/// - a focus that occurs exits 0, with no output on the two streams;
+/// - `already focused` exits 2, which is an error code for a condition that needs no action, so
+///   this code must read it as a success or each click reports a failure;
+/// - a session that ended exits 0 and prints the list of live sessions on stdout, which is why
+///   success is silence and not the exit code.
 fn pane_outcome(ok: bool, stdout: &str, stderr: &str) -> Result<(), String> {
     if ok && stdout.is_empty() && stderr.is_empty() {
         return Ok(());
@@ -242,16 +237,18 @@ fn pane_outcome(ok: bool, stdout: &str, stderr: &str) -> Result<(), String> {
     Err(why.to_string())
 }
 
-/// Move a terminal to another session, waking its client first so that zellij will listen.
+/// Move a terminal to another session. The client receives a keystroke first, so that zellij
+/// accepts the action.
 ///
-/// 🔴 **The wake is unconditional** — see the module note. Asking first only bought a timeout.
+/// The keystroke is unconditional. See the note on this module: an attempt first only added a
+/// timeout.
 ///
-/// `Ok(false)` means even the woken client did not move, or the window went away underneath us.
-/// Either way the caller's answer is the same: open a terminal.
+/// `Ok(false)` means that the client did not move, or that the window ended. The answer of the
+/// caller is the same in the two conditions: open a terminal.
 fn retarget(from: &Terminal, target: &Target) -> Result<bool, String> {
-    // ⚠️ Raise before waking. The wake is a real key event, and the surest way for it to land in
-    // this terminal is for this terminal to be the focused window — which it is about to become
-    // anyway. `Ok(false)` here is the window having closed between the scan and now.
+    // Raise the window before the keystroke. The keystroke is a real key event, and it reaches
+    // this terminal most reliably if this terminal has the focus, which it receives in any case.
+    // `Ok(false)` here means that the window closed after the scan.
     if !raise(from.window)? {
         return Ok(false);
     }
@@ -259,12 +256,12 @@ fn retarget(from: &Terminal, target: &Target) -> Result<bool, String> {
     switch(from, target)
 }
 
-/// Make this terminal's client the one zellij will listen to, by giving it a keystroke.
+/// Make the client of this terminal the client that zellij accepts actions from, with a
+/// keystroke.
 ///
-/// 🔴 **There is no polite way to do this.** `last_active_client` moves only for a real `Key`
-/// message from a real client, so nothing the CLI can send will do it — see the module note. A
-/// synthetic key through the compositor is the only lever, which is why `WAKE_KEY` has to be one
-/// zellij swallows whole.
+/// There is no other method. `last_active_client` changes only for a real `Key` message from a
+/// real client, so no CLI command can change it. See the note on this module. A synthetic key
+/// through the compositor is the only method, which is why zellij must consume `WAKE_KEY`.
 fn wake(window: u32) -> Result<(), String> {
     for _ in 0..2 {
         let out = hyprctl()
@@ -280,8 +277,8 @@ fn wake(window: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// ⚠️ `send_shortcut` takes the window it is aimed at, so this does not depend on the compositor's
-/// idea of focus — but see `retarget`, which raises first anyway.
+/// `send_shortcut` takes the target window, so this does not depend on the focus in the
+/// compositor. But `retarget` raises the window first in any case.
 fn wake_lua(window: u32) -> String {
     format!(
         "for _,w in ipairs(hl.get_windows()) do if w.pid=={window} then \
@@ -290,11 +287,12 @@ fn wake_lua(window: u32) -> String {
     )
 }
 
-/// Ask zellij to retarget a terminal, landing on the agent's pane in the same call.
+/// Ask zellij to change the session in a terminal, and to focus the pane of the agent in the
+/// same call.
 ///
-/// `Ok(false)` means zellij took the request and moved nothing — see the module note on
-/// `last_active_client`. That is not an error and must not be logged as one; it is a fact about
-/// which client last pressed a key, and the caller's answer to it is to open a terminal.
+/// `Ok(false)` means that zellij accepted the request and moved nothing. See the note on this
+/// module about `last_active_client`. That is not an error and must not go to the log as one. It
+/// reports which client last pressed a key, and the caller then opens a terminal.
 fn switch(from: &Terminal, target: &Target) -> Result<bool, String> {
     let out = zellij()
         .args(["--session", &from.session, "action", "switch-session"])
@@ -316,8 +314,8 @@ fn switch(from: &Terminal, target: &Target) -> Result<bool, String> {
     Ok(arrived(from.client, &target.session))
 }
 
-/// Whether the client actually turned up in `session`, read back from the socket rather than
-/// taken on trust. ⚠️ The exit code says only that the request was accepted.
+/// Did the client arrive in `session`? This reads the socket again instead of trust in the exit
+/// code, which reports only that zellij accepted the request.
 fn arrived(client: u32, session: &str) -> bool {
     let deadline = Instant::now() + SWITCH_DEADLINE;
     loop {
@@ -335,8 +333,8 @@ fn arrived(client: u32, session: &str) -> bool {
     }
 }
 
-/// Bring a window to the front. `Ok(false)` means the compositor no longer knows that pid — a
-/// race against a terminal closing, not a failure.
+/// Bring a window to the front. `Ok(false)` means that the compositor does not know that pid,
+/// which is a race with a terminal that closes and not a failure.
 fn raise(window: u32) -> Result<bool, String> {
     let out = hyprctl()
         .arg("repl")
@@ -347,9 +345,9 @@ fn raise(window: u32) -> Result<bool, String> {
     match String::from_utf8_lossy(&out.stdout).trim() {
         "raised" => Ok(true),
         "none" => Ok(false),
-        // ⚠️ Anything else is a broken compositor call, not an absent window, and the difference
-        // matters: treating it as absent would open a duplicate terminal for a session that is
-        // sitting there on screen.
+        // Another value means a failed compositor call and not an absent window. The difference
+        // is important: an absent window opens a second terminal for a session that is already
+        // on screen.
         other => Err(format!(
             "raise {window} failed: {}",
             first_line(other).unwrap_or("hyprctl said nothing")
@@ -357,15 +355,15 @@ fn raise(window: u32) -> Result<bool, String> {
     }
 }
 
-/// The compositor half of the raise, as a Lua expression.
+/// The compositor part of the raise, as a Lua expression.
 ///
-/// ⚠️ **Hyprland 0.56 moved `hyprctl dispatch` onto a Lua API.** The documented
-/// `hyprctl dispatch focuswindow address:0x…` is a *syntax error* here, and there is no
-/// `focuswindow` under `hl.dsp.window.*` — the dispatcher is `hl.dsp.focus`, which takes a table.
-/// `repl` is used rather than `eval` because `eval` prints `ok` and discards the result, and the
-/// result is the whole point: it is how we learn there was no window.
+/// Hyprland 0.56 moved `hyprctl dispatch` to a Lua API. The documented
+/// `hyprctl dispatch focuswindow address:0x…` is a syntax error here, and there is no
+/// `focuswindow` in `hl.dsp.window.*`. The dispatcher is `hl.dsp.focus`, and it takes a table.
+/// This code uses `repl` and not `eval`, because `eval` prints `ok` and discards the result. The
+/// result is necessary, because it reports that there was no window.
 ///
-/// Only a pid is interpolated, so there is nothing here to quote.
+/// The code inserts a pid only, so there is nothing to quote.
 fn raise_lua(window: u32) -> String {
     format!(
         "for _,w in ipairs(hl.get_windows()) do \
@@ -374,8 +372,8 @@ fn raise_lua(window: u32) -> String {
     )
 }
 
-/// Every pid the compositor owns a window for. Asked for as a flat list rather than parsed out of
-/// `hyprctl clients -j`, so this module still needs no JSON.
+/// Each pid that owns a window in the compositor. The request gives a flat list, instead of a
+/// parse of `hyprctl clients -j`, so this module needs no JSON.
 fn window_pids() -> Result<Vec<u32>, String> {
     let out = hyprctl()
         .arg("repl")
@@ -386,10 +384,10 @@ fn window_pids() -> Result<Vec<u32>, String> {
         .output()
         .map_err(|e| format!("hyprctl: {e}"))?;
 
-    // ⚠️ The complaint is quoted back rather than swallowed. `hyprctl` answers a question it
-    // cannot ask on *stdout* and exits 0, so this string is the only place its reason survives
-    // — and "could not read the window list" alone sent one real failure to the journal every
-    // five seconds for a day without ever naming `HYPRLAND_INSTANCE_SIGNATURE`.
+    // The message goes into the error and is not discarded. `hyprctl` writes a refusal on
+    // stdout and exits 0, so this string is the only record of the reason. The text "could not
+    // read the window list" alone sent one real failure to the journal every five seconds for
+    // one day and never named `HYPRLAND_INSTANCE_SIGNATURE`.
     let said = String::from_utf8_lossy(&out.stdout);
     let said = said.trim();
     parse_window_pids(said).ok_or_else(|| {
@@ -400,9 +398,9 @@ fn window_pids() -> Result<Vec<u32>, String> {
     })
 }
 
-/// ⚠️ An empty answer is a desktop with no windows, which is legal. Anything non-numeric is the
-/// compositor complaining, and must not be read as *no windows* — that would open a terminal for
-/// a session already on screen.
+/// An empty answer means a desktop with no windows, which is a valid state. A value that is not
+/// a number is a message from the compositor, and this code must not read it as "no windows",
+/// because that opens a terminal for a session that is already on screen.
 fn parse_window_pids(out: &str) -> Option<Vec<u32>> {
     if out.is_empty() {
         return Some(Vec::new());
@@ -410,14 +408,14 @@ fn parse_window_pids(out: &str) -> Option<Vec<u32>> {
     out.split(',').map(|p| p.trim().parse().ok()).collect()
 }
 
-/// The pid of the first ancestor the compositor owns a window for. The client sits a few hops
-/// under the terminal emulator — client, shell, terminal — and only the compositor knows which of
-/// those pids is the window.
+/// The pid of the first parent that owns a window in the compositor. The client is some steps
+/// below the terminal emulator, in the order client, shell, terminal. Only the compositor knows
+/// which of those pids is the window.
 fn window_of(chain: &[u32], windows: &[u32]) -> Option<u32> {
     chain.iter().find(|pid| windows.contains(pid)).copied()
 }
 
-/// A pid and its parents, up to the session leader.
+/// A pid and its parents, to the session leader.
 fn ancestry(pid: u32) -> Vec<u32> {
     let mut chain = Vec::new();
     let mut pid = pid;
@@ -434,11 +432,11 @@ fn ancestry(pid: u32) -> Vec<u32> {
     chain
 }
 
-/// Which session each zellij client is **currently** showing, by pairing the two ends of its
-/// socket: the server end carries the session's socket path, the peer end is held by the client.
+/// Which session each zellij client shows now. This pairs the two ends of its socket: the
+/// server end holds the socket path of the session, and the client holds the peer end.
 ///
-/// ⚠️ Only `ss` can do this — it reads peers over sock_diag netlink, and `/proc/net/unix` does not
-/// carry them at all. `ss` is on the systemd unit's forced PATH.
+/// Only `ss` can do this, because it reads peers over sock_diag netlink and `/proc/net/unix`
+/// does not hold them. `ss` is on the PATH that the systemd unit sets.
 fn live_sessions() -> Result<HashMap<u32, String>, String> {
     let out = Command::new("ss")
         .args(["-x", "-p"])
@@ -450,15 +448,15 @@ fn live_sessions() -> Result<HashMap<u32, String>, String> {
     ))
 }
 
-/// Join `ss -x -p` rows against the known server socket paths.
+/// Join the rows of `ss -x -p` with the known socket paths of the servers.
 ///
-/// A row is `netid state recv-q send-q <addr> <inode> <peer-addr> <peer-inode> users:(…)`. Rows
-/// whose local address is a server's socket path name a session; the pid holding that row's
-/// *peer* inode is the client attached to it.
+/// A row is `netid state recv-q send-q <addr> <inode> <peer-addr> <peer-inode> users:(…)`. A row
+/// whose local address is the socket path of a server names a session. The pid that holds the
+/// peer inode of that row is the client that attached to it.
 ///
-/// 🔴 **The session comes from the socket path, not from the client's argv** — the whole point of
-/// [[CSB-17]]. ⚠️ Splitting on whitespace assumes the socket path has none, which is true of
-/// every path zellij builds.
+/// The session comes from the socket path and not from the argv of the client. The split on
+/// spaces assumes that the socket path has none, which is true of each path that zellij
+/// builds.
 fn pair_sockets(ss: &str, servers: &HashMap<String, String>) -> HashMap<u32, String> {
     let mut owner: HashMap<u64, u32> = HashMap::new();
     let mut served: Vec<(u64, String)> = Vec::new();
@@ -485,8 +483,8 @@ fn pair_sockets(ss: &str, servers: &HashMap<String, String>) -> HashMap<u32, Str
         .collect()
 }
 
-/// The first `pid=N` in an `ss` process column — `users:(("zellij",pid=6435,fd=79),…)`. A socket
-/// held by several processes is one that was forked across; any of them names the same client.
+/// The first `pid=N` in a process column of `ss`: `users:(("zellij",pid=6435,fd=79),…)`. If
+/// several processes hold one socket, a fork occurred, and each of them names the same client.
 fn pid_in(users: &str) -> Option<u32> {
     let rest = users.split_once("pid=")?.1;
     let end = rest
@@ -495,10 +493,10 @@ fn pid_in(users: &str) -> Option<u32> {
     rest[..end].parse().ok()
 }
 
-/// Every live session's socket path, mapped to its session name, read off the servers themselves.
+/// The socket path of each live session, with its session name, from the servers themselves.
 ///
-/// Taken from `--server <path>` rather than assembled from a socket directory, so nothing here
-/// has to know whether zellij put its sockets under `$XDG_RUNTIME_DIR` or `/tmp`.
+/// This comes from `--server <path>` and not from a socket directory, so no code here must know
+/// whether zellij puts its sockets in `$XDG_RUNTIME_DIR` or in `/tmp`.
 fn server_sockets() -> HashMap<String, String> {
     proc_argvs()
         .filter_map(|argv| {
@@ -509,7 +507,7 @@ fn server_sockets() -> HashMap<String, String> {
         .collect()
 }
 
-/// The socket path a `zellij --server <path>` process is serving, if that is what this argv is.
+/// The socket path that a `zellij --server <path>` process serves, if this argv is one.
 fn server_socket(argv: &[String]) -> Option<&str> {
     if !is_zellij(argv) {
         return None;
@@ -518,14 +516,14 @@ fn server_socket(argv: &[String]) -> Option<&str> {
     argv.get(at + 1).map(String::as_str)
 }
 
-/// Every zellij *client* process on the box.
+/// Each zellij client process on this machine.
 ///
-/// 🔴 **Deliberately says nothing about which session.** That was CSB-16's mistake: it filtered on
-/// the session name appearing in the argv, which names where the client *started*. Which session
-/// a client is showing is the socket's business, not argv's.
+/// This gives no session on purpose. An earlier design filtered on the session name in the argv,
+/// which names where the client started. The socket gives the session that a client shows, and
+/// the argv does not.
 ///
-/// ⚠️ Two invocations must still be excluded or they match themselves: the long-lived `--server`,
-/// and the momentary `zellij --session x action …` that this very module spawns.
+/// Two other processes must stay out of this list: the `--server` process, and the short
+/// `zellij --session x action …` process that this module starts.
 fn client_pids() -> Vec<u32> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
@@ -541,7 +539,7 @@ fn client_pids() -> Vec<u32> {
         .collect()
 }
 
-/// Every process's argv, for the scans that have to look at all of them.
+/// The argv of each process, for the scans that must examine all of them.
 fn proc_argvs() -> impl Iterator<Item = Vec<String>> {
     std::fs::read_dir("/proc")
         .into_iter()
@@ -553,7 +551,8 @@ fn proc_argvs() -> impl Iterator<Item = Vec<String>> {
         })
 }
 
-/// Split a `/proc/<pid>/cmdline` into arguments. NUL-separated, usually NUL-terminated.
+/// Split a `/proc/<pid>/cmdline` into arguments. NUL separates them, and one usually ends the
+/// data.
 fn argv(raw: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(raw)
         .split('\0')
@@ -567,7 +566,7 @@ fn is_zellij(argv: &[String]) -> bool {
         .is_some_and(|exe| exe.rsplit('/').next() == Some("zellij"))
 }
 
-/// Whether this argv is an attached zellij client, as opposed to a server or a CLI action.
+/// Is this argv an attached zellij client, and not a server or a CLI action?
 fn is_client(argv: &[String]) -> bool {
     is_zellij(argv) && !argv.iter().any(|a| a == "--server" || a == "action")
 }
@@ -577,9 +576,9 @@ fn ppid(pid: u32) -> Option<u32> {
     ppid_from_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
 }
 
-/// ⚠️ Field two of `stat` is the executable name **in parentheses and unescaped** — it can
-/// contain spaces and parentheses of its own, so the fields after it are only safe to split from
-/// the *last* `)` in the line.
+/// Field two of `stat` is the name of the executable, in parentheses and without escapes. It
+/// can contain spaces and parentheses, so a split of the fields after it must start at the last
+/// `)` in the line.
 fn ppid_from_stat(stat: &str) -> Option<u32> {
     stat[stat.rfind(')')? + 1..]
         .split_whitespace()
@@ -588,18 +587,18 @@ fn ppid_from_stat(stat: &str) -> Option<u32> {
         .ok()
 }
 
-/// Last resort: nothing on this box is showing the session and no terminal would take it, so open
-/// one that does.
+/// The last method: no window on this machine shows the session, and no terminal accepted it, so
+/// open a terminal that does.
 ///
-/// 🔴 **The zellij variables have to go.** If the applet was itself started from inside a zellij
-/// pane it inherits `ZELLIJ_SESSION_NAME`, and `zellij attach` then *panics* — "You are trying to
-/// attach to the current session. This is not supported" — for every session, not just that one.
-/// The new terminal is not inside anything, so saying so is the truthful environment as well as
-/// the working one. Observed while testing [[CSB-16]]; the systemd unit's environment happens to
-/// be clean, which is exactly what would have kept this hidden until he ran it by hand.
+/// The zellij variables must go. If the applet starts inside a zellij pane, it inherits
+/// `ZELLIJ_SESSION_NAME`, and `zellij attach` then panics with "You are trying to attach to the
+/// current session. This is not supported" for each session. The new terminal is inside no
+/// session, so an environment without those variables is correct as well as operational. The
+/// environment of the systemd unit has no such variables, which would hide this failure until a
+/// person started the applet by hand.
 ///
-/// The child is waited on in a detached thread purely so it cannot linger as a zombie — the
-/// terminal's lifetime is its own, and the applet neither owns nor outlives it.
+/// A separate thread waits for the child process, so that it cannot become a zombie. The
+/// terminal has its own lifetime, and the applet neither owns it nor continues after it.
 fn attach(session: &str) -> Result<(), String> {
     let mut child = strip_zellij(Command::new(TERMINAL))
         .args(["-e", "zellij", "attach"])
@@ -612,18 +611,18 @@ fn attach(session: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The environment variable `hyprctl` uses to find the compositor it should talk to.
+/// The environment variable that `hyprctl` uses to find its compositor.
 const HYPR_SIGNATURE: &str = "HYPRLAND_INSTANCE_SIGNATURE";
 
-/// A `hyprctl` invocation that knows which compositor it is for.
+/// A `hyprctl` command that knows its compositor.
 ///
-/// 🔴 **The signature is resolved here because this process cannot have inherited it** —
-/// see the module note. systemd starts the applet at boot, Hyprland starts inside that same
-/// session afterwards, and the unit's environment is a snapshot taken before the compositor
-/// existed. Without this, `terminals` fails on its first call and *every* click is a no-op.
+/// This code finds the signature because the process cannot inherit it. See the note on this
+/// module. systemd starts the applet at boot, Hyprland starts inside that session afterwards,
+/// and the environment of the unit is a copy from before the compositor existed. Without this,
+/// `terminals` fails at its first call and each click does nothing.
 ///
-/// An environment that does have it wins: that is the compositor the person is actually looking
-/// at, and it is the only answer that stays right when a second one is running.
+/// An environment that has the value wins, because that is the compositor that the person looks
+/// at. It is also the only correct answer if a second compositor runs.
 fn hyprctl() -> Command {
     let mut cmd = Command::new("hyprctl");
     if std::env::var_os(HYPR_SIGNATURE).is_none()
@@ -634,21 +633,22 @@ fn hyprctl() -> Command {
     cmd
 }
 
-/// The running compositor's signature, read off `$XDG_RUNTIME_DIR/hypr` the way `hyprctl`
-/// itself lays it out: one directory per instance, named by the signature, holding the socket.
+/// The signature of the running compositor, from `$XDG_RUNTIME_DIR/hypr`, in the layout that
+/// `hyprctl` uses: one directory for each instance, with the signature as its name and the
+/// socket inside it.
 ///
-/// ⚠️ **A directory is not an instance — a socket is.** Hyprland leaves the directory (and its
-/// log) behind when it exits, so a box that has been through a compositor restart has several,
-/// and only one of them can still be spoken to. Requiring `.socket.sock` drops the corpses, and
-/// the newest of what survives is the live one.
+/// A directory is not an instance, but a socket is. Hyprland leaves the directory and its log
+/// after it exits, so a machine with a restart of the compositor has several directories and
+/// only one of them accepts a connection. A test for `.socket.sock` removes the old
+/// directories, and the newest of the remainder is the live one.
 fn hypr_signature() -> Option<std::ffi::OsString> {
     live_instance(&runtime_dir()?.join("hypr"))
 }
 
-/// The newest instance directory under `hypr` that still has a socket in it.
+/// The newest instance directory in `hypr` that still holds a socket.
 ///
-/// The directory is an argument so the rule above is a test rather than a thing you have to
-/// restart a compositor to see.
+/// The directory is an argument, so a test can verify the rule above without a restart of a
+/// compositor.
 fn live_instance(hypr: &std::path::Path) -> Option<std::ffi::OsString> {
     let mut instances: Vec<(std::time::SystemTime, std::ffi::OsString)> = std::fs::read_dir(hypr)
         .ok()?
@@ -660,12 +660,12 @@ fn live_instance(hypr: &std::path::Path) -> Option<std::ffi::OsString> {
     instances.pop().map(|(_, name)| name)
 }
 
-/// `$XDG_RUNTIME_DIR`, or the path systemd would have put it at.
+/// `$XDG_RUNTIME_DIR`, or the path that systemd uses for it.
 ///
-/// ⚠️ The fallback exists for the same reason this whole function does: a unit started before
-/// the graphical session may be missing this variable too, and `/run/user/<uid>` is where the
-/// user manager has already mounted it. The uid comes from `/proc/self`, so no libc is needed
-/// for one number.
+/// The second path exists for the same reason as this function: a unit that starts before the
+/// graphical session can also have no value for this variable, and the user manager has already
+/// mounted the directory at `/run/user/<uid>`. The uid comes from `/proc/self`, so this needs no
+/// libc for one number.
 fn runtime_dir() -> Option<std::path::PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         return Some(std::path::PathBuf::from(dir));
@@ -675,12 +675,12 @@ fn runtime_dir() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(format!("/run/user/{uid}")))
 }
 
-/// A `zellij` invocation that is honest about not being inside a session.
+/// A `zellij` command that reports that it is not inside a session.
 ///
-/// ⚠️ **Not merely tidy — `zellij action` *hangs* when `ZELLIJ_SESSION_NAME` names a session that
-/// no longer exists.** A tray applet started from inside a pane would inherit exactly that once
-/// the pane's session ended, and every click would then block forever on a thread nobody joins.
-/// Stripping the variables removes the code path rather than racing it.
+/// This is necessary: `zellij action` stops and waits when `ZELLIJ_SESSION_NAME` names a session
+/// that no longer exists. A tray applet that starts inside a pane inherits that value after the
+/// session of the pane ends, and each click then blocks a thread that nobody joins. The removal
+/// of the variables removes that condition.
 fn zellij() -> Command {
     strip_zellij(Command::new("zellij"))
 }
@@ -709,8 +709,8 @@ mod tests {
         assert!(pane_outcome(true, "", "").is_ok());
     }
 
-    /// 🔴 The case every click in the journal actually hit. zellij calls it an error and exits 2;
-    /// it means the pane was already where it should be.
+    /// The condition that each click in the journal caused. zellij reports an error and exits
+    /// 2, but the pane was already in the correct place.
     #[test]
     fn already_focused_is_success() {
         assert!(pane_outcome(false, "", "Pane Terminal(0) is already focused").is_ok());
@@ -722,7 +722,7 @@ mod tests {
         assert!(e.contains("not found"), "{e}");
     }
 
-    /// A session that has gone away exits 0 and prints the live sessions on stdout.
+    /// A session that ended exits 0 and prints the live sessions on stdout.
     #[test]
     fn chatty_exit_zero_is_failure() {
         assert!(pane_outcome(true, "Sessions:\ndotfiles", "").is_err());
@@ -739,8 +739,8 @@ mod tests {
         }
     }
 
-    /// ⚠️ The server carries a session name too, and reaches no window. Matching it would make
-    /// every detached session look attached — the one mistake that breaks the whole ticket.
+    /// The server also carries a session name, and it reaches no window. A match on it would
+    /// make each detached session look attached.
     #[test]
     fn server_is_not_a_client() {
         let a = args(&[
@@ -751,7 +751,7 @@ mod tests {
         assert!(!is_client(&a));
     }
 
-    /// This module's own steps, caught mid-spawn, must not look like a client.
+    /// A process that this module starts must not look like a client.
     #[test]
     fn our_own_action_is_not_a_client() {
         let a = args(&[
@@ -786,8 +786,8 @@ mod tests {
             .collect()
     }
 
-    /// 🔴 The whole of [[CSB-17]] in one assertion: the client's argv says `dotfiles`, and the
-    /// socket says it is showing `nixos`. Transcribed from a real `ss -x -p` on the box.
+    /// The argv of the client says `dotfiles`, and the socket says that it shows `nixos`. This
+    /// data comes from a real `ss -x -p` on the machine.
     #[test]
     fn the_socket_outranks_the_argv() {
         let ss = "\
@@ -797,7 +797,7 @@ u_str ESTAB 0 0 * 364748 * 324481 users:((\"zellij\",pid=6435,fd=79),(\"zellij\"
         assert_eq!(live.get(&6435).map(String::as_str), Some("nixos"));
     }
 
-    /// A detached session has a server and no client, and must contribute nobody.
+    /// A detached session has a server and no client, so it adds no row.
     #[test]
     fn a_server_with_no_peer_names_no_client() {
         let ss = "\
@@ -806,8 +806,8 @@ u_str LISTEN 0 128 /run/user/1000/zellij/c1/infra 700 * 0 users:((\"zellij\",pid
         assert!(live.is_empty(), "{live:?}");
     }
 
-    /// ⚠️ Sockets that are nothing to do with zellij share the table and must be ignored, as must
-    /// the header row.
+    /// The table also holds sockets from other programs. This code must ignore them and the
+    /// header row.
     #[test]
     fn unrelated_sockets_are_ignored() {
         let ss = "\
@@ -827,7 +827,8 @@ u_str ESTAB 0 0 /run/user/1000/wayland-1 900 * 901 users:((\"ghostty\",pid=5091,
         assert_eq!(pid_in(""), None);
     }
 
-    /// The comm field is unescaped, so a process named `(evil) 1 2` would derail a naive split.
+    /// The comm field has no escapes, so a process with the name `(evil) 1 2` would break a
+    /// simple split.
     #[test]
     fn ppid_survives_a_hostile_comm() {
         assert_eq!(
@@ -838,7 +839,8 @@ u_str ESTAB 0 0 /run/user/1000/wayland-1 900 * 901 users:((\"ghostty\",pid=5091,
         assert_eq!(ppid_from_stat("no parens here"), None);
     }
 
-    /// Client, shell, terminal: the terminal is the first one the compositor has heard of.
+    /// In the order client, shell, terminal, the terminal is the first pid that the compositor
+    /// knows.
     #[test]
     fn the_window_is_the_first_ancestor_with_one() {
         assert_eq!(
@@ -848,8 +850,8 @@ u_str ESTAB 0 0 /run/user/1000/wayland-1 900 * 901 users:((\"ghostty\",pid=5091,
         assert_eq!(window_of(&[6435, 5353], &[5091]), None);
     }
 
-    /// ⚠️ No windows and a broken compositor call must not look alike — one means *open a
-    /// terminal*, the other means *something is wrong*.
+    /// No windows and a failed compositor call must give different results. The first means to
+    /// open a terminal, and the second means a failure.
     #[test]
     fn window_pids_tell_empty_from_broken() {
         assert_eq!(parse_window_pids("5091,62859"), Some(vec![5091, 62859]));
@@ -857,10 +859,10 @@ u_str ESTAB 0 0 /run/user/1000/wayland-1 900 * 901 users:((\"ghostty\",pid=5091,
         assert_eq!(parse_window_pids("Lua error: nope"), None);
     }
 
-    /// 🔴 The failure that made every click a no-op: an applet started before the
-    /// compositor has no `HYPRLAND_INSTANCE_SIGNATURE`, and `hyprctl` then answers this on
-    /// **stdout** with exit 0. It has to be read as broken, never as "no windows" — the latter
-    /// would open a duplicate terminal for a session already on screen.
+    /// The failure that stopped each click: an applet that starts before the compositor has no
+    /// `HYPRLAND_INSTANCE_SIGNATURE`, and `hyprctl` then writes this text on stdout and exits 0.
+    /// This code must read it as a failure and never as "no windows", because that opens a
+    /// second terminal for a session that is already on screen.
     #[test]
     fn hyprctl_refusing_to_answer_is_not_an_empty_desktop() {
         assert_eq!(
@@ -869,20 +871,22 @@ u_str ESTAB 0 0 /run/user/1000/wayland-1 900 * 901 users:((\"ghostty\",pid=5091,
         );
     }
 
-    /// A directory is left behind when a compositor exits; only the socket says one is live.
+    /// A compositor leaves its directory after it exits. Only the socket shows that an instance
+    /// is live.
     #[test]
     fn the_live_instance_is_the_newest_one_with_a_socket() {
         let root = std::env::temp_dir().join(format!("claude-tray-hypr-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
 
-        // Two corpses and one live instance, created oldest first so mtimes order themselves.
+        // Two old directories and one live instance, created oldest first, so that the
+        // modification times give the order.
         for (name, socket) in [("dead_old", true), ("live", true), ("logs_only", false)] {
             std::fs::create_dir_all(root.join(name)).unwrap();
             if socket {
                 std::fs::write(root.join(name).join(".socket.sock"), "").unwrap();
             }
         }
-        // `logs_only` is newest and has no socket, so it must lose to `live`.
+        // `logs_only` is the newest and has no socket, so `live` must win.
         let touch = |name: &str| {
             std::fs::write(root.join(name).join("hyprland.log"), "x").unwrap();
         };
@@ -901,14 +905,14 @@ u_str ESTAB 0 0 /run/user/1000/wayland-1 900 * 901 users:((\"ghostty\",pid=5091,
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// ⚠️ The wake is only invisible while it is a key zellij consumes — `Ctrl e`, its
-    /// locked-mode toggle. A wrong modifier here reaches whatever is running in the pane.
+    /// The keystroke stays invisible only while zellij consumes the key. `Ctrl e` toggles
+    /// locked mode. A wrong modifier here reaches the program in the pane.
     #[test]
     fn wake_lua_sends_ctrl_e_to_one_window() {
         let lua = wake_lua(5091);
         assert!(lua.contains("w.pid==5091"), "{lua}");
-        // 🔴 The modifier is a name, not the numeric modmask — `mods=4` is dropped in silence
-        // and the pane receives a bare `e`. See `WAKE_MODS`.
+        // The modifier is a name and not the numeric mask. Hyprland discards `mods=4` without
+        // a message, and the pane then receives a plain `e`. See `WAKE_MODS`.
         assert!(lua.contains("mods=\"CTRL\",key=\"e\""), "{lua}");
         assert!(lua.contains("hl.dsp.send_shortcut"), "{lua}");
     }

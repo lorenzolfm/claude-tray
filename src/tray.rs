@@ -8,47 +8,47 @@ use ksni::{Icon, MenuItem, Status};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// How long after a menu opens the spinner keeps turning.
+/// How long the spinner continues to turn after a menu opens.
 ///
-/// 🔴 **This is a guess, and it has to be, because there is no way to learn the menu closed.**
-/// `com.canonical.dbusmenu` announces an opening (`AboutToShow`, which reaches
-/// [`ksni::Tray::menu_about_to_show`]) and ksni 0.3.6 routes only `clicked` out of `Event`, so
-/// the `closed` the host does send falls on the floor upstream. The window is what stands in
-/// for it, and it is wrong in both directions by construction:
+/// This value is an estimate, because there is no signal that the menu closed.
+/// `com.canonical.dbusmenu` reports an open (`AboutToShow`, which reaches
+/// [`ksni::Tray::menu_about_to_show`]). But ksni 0.3.6 sends only `clicked` out of `Event`, so
+/// the `closed` signal from the host does not arrive. This time limit replaces it, and it is
+/// wrong in two directions:
 ///
-/// - close the menu early and the applet keeps ticking for the remainder — ten small
-///   `ItemsPropertiesUpdated` a second at nobody, though still **no producer runs**, so this
-///   costs signals and not processes;
-/// - leave it open past the minute and the spinners go still, which reads as a wedged applet
-///   rather than as a wedged agent.
+/// - if the menu closes before the limit, the applet continues to tick for the remainder. That
+///   sends ten small `ItemsPropertiesUpdated` a second to nobody. No producer runs, so the cost
+///   is signals and not processes.
+/// - if the menu stays open past the limit, the spinners stop, which looks like a stuck applet
+///   and not a stuck agent.
 ///
-/// A minute picks the second failure over the first, because staring at a tray menu for a
-/// minute is a thing nobody does and closing one after two seconds is a thing everybody does.
+/// One minute accepts the second failure and prevents the first, because a person does not look
+/// at a tray menu for one minute but does close one after two seconds.
 const SPIN_AFTER_OPEN: u64 = 60_000;
 
-/// The animation clock, shared between the poll loop that turns it and the tray that reads it.
+/// The animation clock. The poll loop advances it, and the tray reads it.
 ///
-/// 🔴 **It is shared so that the quiet case can stay quiet.** `Handle::update` re-derives every
-/// tray property and rebuilds the whole menu in order to diff them, so *asking* the tray whether
-/// it needs a repaint would cost the same as repainting. These three cells are what let
-/// `main` decide not to call it at all, which is the difference between a busy box and an idle
-/// one for every tick where the menu is shut.
+/// The two share it so that a quiet tick stays cheap. `Handle::update` computes each tray
+/// property again and rebuilds the full menu to compare them, so a question to the tray about a
+/// repaint costs as much as the repaint. These three cells let `main` decide not to call it at
+/// all, which is the difference between a busy machine and an idle one at each tick with the
+/// menu closed.
 #[derive(Debug, Default)]
 pub struct Animation {
-    /// Ticks since start. Monotonic and never reset, so every busy row in the menu turns off
-    /// one clock — which reads as one thing happening rather than as several rows each doing
-    /// their own.
+    /// Ticks since the start. The value only increases, so each busy row in the menu turns from
+    /// one clock and the rows move together.
     frame: AtomicU64,
-    /// Unix millis of the last `AboutToShow`, or 0 for "never opened".
+    /// Unix milliseconds at the last `AboutToShow`, or 0 if the menu never opened.
     opened_at_ms: AtomicU64,
-    /// Did the last poll find a row whose glyph moves? Written by [`ClaudeTray::refresh`], so it
-    /// is at worst one poll stale — and a stale `true` costs a repaint, not a wrong picture.
+    /// Did the last poll find a row with a glyph that moves? [`ClaudeTray::refresh`] writes it,
+    /// so it is one poll old at worst. An old `true` costs one repaint and not a wrong
+    /// picture.
     spinning: AtomicBool,
 }
 
 impl Animation {
-    /// One tick. Free enough to do unconditionally, which is what keeps the spinner's phase a
-    /// function of wall-clock time rather than of how long the menu happened to be open.
+    /// One tick. The cost is low, so this runs at each tick. The phase of the spinner is thus a
+    /// function of the clock and not of the time that the menu was open.
     pub fn advance(&self) {
         self.frame.fetch_add(1, Ordering::Relaxed);
     }
@@ -57,19 +57,19 @@ impl Animation {
         self.frame.load(Ordering::Relaxed)
     }
 
-    /// Is anything on screen turning right now — is this tick worth a repaint?
+    /// Does something on screen turn now, and is this tick thus worth a repaint?
     ///
-    /// Both halves, and the second is the one that matters: a busy agent nobody is *looking at*
-    /// is not a reason to repaint anything.
+    /// Both conditions apply, and the second one is the important one: a busy agent that nobody
+    /// looks at is not a reason for a repaint.
     pub fn is_spinning(&self) -> bool {
         self.spinning.load(Ordering::Relaxed)
             && now_ms().saturating_sub(self.opened_at_ms.load(Ordering::Relaxed)) < SPIN_AFTER_OPEN
     }
 }
 
-/// What the last poll found. An error is a state the tray *shows*, not a reason to exit —
-/// `claude-ps` missing from `PATH` is the one failure this slice can really have, and a
-/// silent tray would hide exactly the thing the applet exists to make visible.
+/// What the last poll found. An error is a state that the tray shows and not a reason to exit.
+/// An absent `claude-ps` on `PATH` is the most probable failure, and a tray that stayed quiet
+/// would hide the state that the applet exists to show.
 enum View {
     Agents(Snapshot),
     Broken(String),
@@ -98,8 +98,9 @@ impl ClaudeTray {
             Ok(rows) => View::Agents(snapshot(&rows, now())),
             Err(e) => View::Broken(e.to_string()),
         };
-        // Told rather than asked, for the reason on [`Animation`]: the loop cannot read this
-        // without paying for a repaint, and a broken producer has no rows and so nothing to turn.
+        // Write the value instead of a read by the loop, for the reason in [`Animation`]: the
+        // loop cannot read it without a repaint. A failed producer has no rows and thus no
+        // spinner.
         self.anim.spinning.store(
             match &self.view {
                 View::Agents(s) => s.any_spinning(),
@@ -109,20 +110,14 @@ impl ClaudeTray {
         );
     }
 
-    /// What goes beside the mark, and in what colour. 🔴 **The mark itself is never part of
-    /// this** — it is identity, and it stays [`crate::mark::CLAUDE`] in every state. Three things
-    /// can appear here and each has exactly one meaning:
+    /// What goes beside the mark, and in which colour. The mark is not part of this. It is
+    /// identity, and it stays [`crate::mark::CLAUDE`] in each state. Three values can appear
+    /// here, and each one has one meaning:
     ///
-    /// - nothing, in the calm case — the mark alone;
-    /// - the count in [`BLOCKED`] amber, which is what the retired `◈` glyph used to say:
-    ///   somebody is stuck on him;
-    /// - `⊘` in [`FAULT`] red — not "you have work" but *the applet cannot see*. `⊘` was
-    ///   originally *unreachable*, which cannot happen on one box; a producer that is missing
-    ///   or exiting non-zero is the real failure, and it inherits the shape.
-    ///
-    /// ⚠️ There used to be a fourth: the count in the bar's own foreground, for turns that had
-    /// *merely finished*. It went when `idle` stopped being counted — every agent in this number
-    /// is blocked now, so a second colour would have been a distinction with one value.
+    /// - nothing, in the quiet state, which shows the mark alone;
+    /// - the count in [`BLOCKED`] amber, which means that an agent waits for you;
+    /// - `⊘` in [`FAULT`] red, which does not mean "you have work" but that the applet cannot
+    ///   see. A producer that is absent or that exits non-zero is the failure that it reports.
     fn badge(&self) -> (String, [u8; 3]) {
         match &self.view {
             View::Broken(_) => ("\u{2298}".to_string(), FAULT),
@@ -131,9 +126,9 @@ impl ClaudeTray {
     }
 }
 
-/// Unix seconds. A clock that cannot be read is treated as the epoch, which only makes the ages
-/// stop advancing between polls — `Snapshot::since` saturates, so a row reads the age the
-/// producer gave it rather than a wrong one. Wrong, but wrong in the quiet direction.
+/// Unix seconds. If the clock cannot be read, this gives the epoch, which stops the ages
+/// between polls. `Snapshot::since` saturates, so a row then shows the age from the producer
+/// instead of a wrong age.
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -141,10 +136,10 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Unix millis, for [`SPIN_AFTER_OPEN`]. Same clock as [`now`] rather than an `Instant`, because
-/// the two sides of [`Animation`] are on different threads and an `Instant` is not a number they
-/// can share in an atomic. An unreadable clock reads as the epoch here too — which puts every
-/// open outside the window, so the spinner stops rather than runs forever.
+/// Unix milliseconds, for [`SPIN_AFTER_OPEN`]. This uses the same clock as [`now`] and not an
+/// `Instant`, because the two sides of [`Animation`] are on different threads and an `Instant`
+/// is not a number that an atomic can hold. A clock that cannot be read gives the epoch here
+/// too, which puts each open outside the time limit and stops the spinner.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -152,21 +147,18 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// One menu row. Clicking it puts him in front of that session — see [`crate::jump`], which
-/// switches the terminal he already has to that session, or opens one when there is none.
+/// One menu row. A click on it moves you to that session. See [`crate::jump`], which changes
+/// the session in the terminal that you have, or opens a terminal if there is none.
 ///
-/// 🔴 **A row is enabled exactly when it has somewhere to send him**, whatever its state.
-/// [[CSB-11]] made `enabled: false` the way to *look* secondary, and [[CSB-12]] hung it on the
-/// aged-out rows — reasonable when the click was a no-op, and wrong the moment [[CSB-17]] made a
-/// click actually land somewhere. It meant the rows he is most likely to have **forgotten
-/// about** were the only ones he could not jump to. Verified against the real menu — GTK reports
-/// such a row `sensitive=false`, so the grey was not merely cosmetic and the click genuinely
-/// could not be made.
+/// A row is enabled when it has a destination, in each state. An earlier design used
+/// `enabled: false` to make a row look secondary, and it applied that to the oldest rows. GTK
+/// gives such a row `sensitive=false`, so the grey was not only a colour and the click could not
+/// occur. The rows that you most probably forgot were thus the only rows that you could not
+/// jump to.
 ///
-/// ⚠️ That state is gone now — `dormant` went with `your turn` — but the rule it taught did not:
-/// dimming is **not** a way to say *uncounted*, which the glyph and the badge already say twice
-/// over. So the only dimmed rows left are agents outside zellij, which have no address to send
-/// him to — where dimmed means **inert**, which is what it should have meant all along.
+/// The rule from that failure stays: a grey row does not mean uncounted, which the glyph and the
+/// badge already show. The only grey rows are agents outside zellij, which have no address. Grey
+/// thus means that the row does nothing.
 fn row(entry: &Entry, frame: u64, since: u64) -> MenuItem<ClaudeTray> {
     let target = entry.target.clone();
     StandardItem {
@@ -194,18 +186,18 @@ fn note(text: impl Into<String>) -> MenuItem<ClaudeTray> {
 }
 
 impl ksni::Tray for ClaudeTray {
-    /// 🔴 Left click opens the menu instead of firing `Activate`. The whole reason this is a
-    /// real tray item rather than a Waybar `custom/*` module was Lorenzo's "like the telegram
-    /// and bluetooth ones, that I can click and show details".
+    /// A left click opens the menu instead of an `Activate` event. This item exists as a real
+    /// tray item, and not as a Waybar `custom/*` module, so that a click shows the details in
+    /// the same way as the Telegram and Bluetooth items.
     const MENU_ON_ACTIVATE: bool = true;
 
     fn id(&self) -> String {
         "claude-tray".into()
     }
 
-    /// 🔴 **Must stay empty.** Waybar's `getIconPixbuf` returns the *named* icon whenever
-    /// `IconName` is non-empty and only then falls back to `IconPixmap`, so a stray name here
-    /// silently discards everything [`crate::icon`] draws.
+    /// This must stay empty. Waybar's `getIconPixbuf` returns the named icon while `IconName`
+    /// has a value, and it uses `IconPixmap` only if that name is empty. A name here thus
+    /// removes each pixel that [`crate::icon`] draws.
     fn icon_name(&self) -> String {
         String::new()
     }
@@ -223,15 +215,15 @@ impl ksni::Tray for ClaudeTray {
         }
     }
 
-    /// 🔴 **Never `Passive`.** Waybar's `show-passive-items` defaults to false and it hides
-    /// passive items outright, so a calm applet marked passive would *vanish* rather than sit
-    /// there showing the bare mark — the exact failure this whole effort exists to prevent.
+    /// Never use `Passive`. Waybar's `show-passive-items` is false by default, and Waybar hides
+    /// a passive item. A quiet applet with that status would thus disappear instead of a display
+    /// of the mark alone, which is the failure that this program prevents.
     ///
-    /// `NeedsAttention` cannot carry its own pixmap (`AttentionIconPixmap` is an unimplemented
-    /// TODO in Waybar), but `Item::setStatus` does add a `needs-attention` CSS class — and a
-    /// tray item being a `Gtk::Image`, the only thing that class can actually do is draw a
-    /// border. So this is the *second* cue, under the badge: the pixmap says what and how many,
-    /// the border says look now.
+    /// `NeedsAttention` cannot carry its own pixmap, because `AttentionIconPixmap` is not
+    /// implemented in Waybar. But `Item::setStatus` adds a `needs-attention` CSS class, and a
+    /// tray item is a `Gtk::Image`, so that class can only draw a border. The border is thus the
+    /// second signal, below the badge: the pixmap gives the number, and the border says to look
+    /// now.
     fn status(&self) -> Status {
         match &self.view {
             View::Agents(s) => {
@@ -241,47 +233,43 @@ impl ksni::Tray for ClaudeTray {
                     Status::Active
                 }
             }
-            // ⚠️ A broken producer is *also* attention. It does not break the
-            // `badge > 0 ⟺ something to do` invariant, because in this state there is no badge
-            // at all — `⊘` renders instead of a number, so the colour cannot be misread as a
-            // count. What it would otherwise be is an applet sitting there looking calm while
-            // it is in fact blind, which is the nightmare this whole effort exists to prevent.
+            // A failed producer also needs attention. It keeps the rule that `badge > 0` means
+            // that there is work, because this state has no badge: the applet draws `⊘` instead
+            // of a number, so nobody can read the colour as a count. Without this, the applet
+            // would look quiet while it cannot see.
             View::Broken(_) => Status::NeedsAttention,
         }
     }
 
-    /// Poll once more on the way to opening, so the list is never a poll interval stale at the
-    /// moment it is actually read.
+    /// Poll again as the menu opens, so that the list is not one poll interval old when a
+    /// person reads it.
     ///
-    /// 🔴 And note the moment: this is the *only* signal that reaches the applet saying anyone is
-    /// looking, and it is what starts the spinner turning. See [`SPIN_AFTER_OPEN`] for the half
-    /// of the story that does not arrive.
+    /// Record the time too. This is the only signal that tells the applet that a person looks at
+    /// the menu, and it starts the spinner. See [`SPIN_AFTER_OPEN`] for the signal that does not
+    /// arrive.
     fn menu_about_to_show(&mut self) {
         self.anim.opened_at_ms.store(now_ms(), Ordering::Relaxed);
         self.refresh();
     }
 
-    /// The applet outlives any particular tray host: systemd starts it at login, Waybar claims
-    /// the watcher later, and a Waybar restart drops and reclaims it. ksni handles the
-    /// re-registration; these two exist so the journal can tell the two invisible states apart —
-    /// *waiting for a bar* and *actually broken* look identical in the tray, which is precisely
-    /// the confusion this applet was built to end.
+    /// The applet continues after a tray host stops. systemd starts it at login, Waybar claims
+    /// the watcher later, and a restart of Waybar releases and claims it again. ksni registers
+    /// the item again. These two functions write to the journal, so that a reader can separate
+    /// the two invisible states: a wait for a bar, and a failure.
     fn watcher_online(&self) {
         eprintln!("claude-tray: tray host appeared, item registered");
     }
 
     fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
         eprintln!("claude-tray: no tray host ({reason:?}), waiting for one");
-        // Keep the service alive and keep polling; the item re-registers when a host returns.
+        // Keep the service and the polls. The item registers again when a host returns.
         true
     }
 
-    /// 🔴 **One flat list, in `luneta`'s order.** The dividers that used to separate "wants
-    /// you" from "is merely running" from "has aged out" are gone with the states they
-    /// separated: the glyph and the word already say which block a row is in, and a menu whose
-    /// groups are drawn differently from the picker's list is the disagreement this whole
-    /// change was about. The only separator left is the one above `Quit`, which is not a group
-    /// boundary but the edge of the list.
+    /// One flat list, in `luneta`'s order. There are no dividers between groups of rows,
+    /// because the glyph and the word already show the group and because a menu with different
+    /// groups from the picker's list would disagree with it. The one separator is above `Quit`,
+    /// and it marks the end of the list and not a group.
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let frame = self.anim.frame();
         let snap = match &self.view {
@@ -295,8 +283,8 @@ impl ksni::Tray for ClaudeTray {
             return vec![note("no agents running"), MenuItem::Separator, quit()];
         }
 
-        // ⚠️ Read once for the whole menu, not per row: the offset has to be the *same* number
-        // everywhere or a slow rebuild would show two rows disagreeing about what time it is.
+        // Read this one time for the full menu and not for each row. The offset must be the
+        // same number in each row, or a slow rebuild shows two different times.
         let since = snap.since(now());
 
         let mut items: Vec<MenuItem<Self>> =
@@ -353,9 +341,8 @@ mod tests {
         }
     }
 
-    /// 🔴 [[CSB-18]]. The row he has most likely forgotten is the last one that should refuse to
-    /// take him there. GTK marks `enabled: false` rows genuinely insensitive, so this flag is
-    /// the jump, not a shade of grey.
+    /// The row that you most probably forgot must not refuse the jump. GTK makes an
+    /// `enabled: false` row insensitive, so this flag controls the jump and not only a colour.
     #[test]
     fn every_state_with_an_address_is_reachable() {
         for state in [State::Waiting, State::Idle, State::Busy, State::Other] {
@@ -363,15 +350,15 @@ mod tests {
         }
     }
 
-    /// ⚠️ The one thing dimming still means: an agent outside zellij has no address, so the row
-    /// is readable and inert rather than a click that quietly does nothing.
+    /// The one meaning that grey keeps: an agent outside zellij has no address, so the row is
+    /// legible and does nothing, instead of a click with no result.
     #[test]
     fn a_row_with_nowhere_to_go_is_inert() {
         assert!(!enabled(&row(&entry(State::Busy, None), 0, 0)));
     }
 
-    /// 🔴 The menu is rebuilt ten times a second off a frozen snapshot, so the offset has to
-    /// reach the label or the age column freezes with the list.
+    /// The menu rebuilds ten times a second from one snapshot, so the offset must reach the
+    /// label or the age column stops with the list.
     #[test]
     fn a_rows_age_counts_on_while_the_menu_is_open() {
         let fresh = label(&row(&entry(State::Idle, somewhere()), 0, 0));
