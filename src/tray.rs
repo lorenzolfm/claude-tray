@@ -1,7 +1,7 @@
 //! The StatusNotifierItem itself: what Waybar reads, and what the menu says.
 
-use crate::icon::{BLOCKED, FAULT, Renderer};
-use crate::state::{Entry, Snapshot, snapshot};
+use crate::icon::Renderer;
+use crate::state::{Badge, Entry, Snapshot, snapshot};
 use crate::{agents, jump};
 use ksni::menu::StandardItem;
 use ksni::{Icon, MenuItem, Status};
@@ -110,18 +110,17 @@ impl ClaudeTray {
         );
     }
 
-    /// What goes beside the mark, and in which colour. The mark is not part of this. It is
-    /// identity, and it stays [`crate::mark::CLAUDE`] in each state. Three values can appear
-    /// here, and each one has one meaning:
+    /// Which of the three states the badge is in. [`Badge`] holds what each one draws, and
+    /// says why there are three and no others.
     ///
-    /// - nothing, in the quiet state, which shows the mark alone;
-    /// - the count in [`BLOCKED`] amber, which means that an agent waits for you;
-    /// - `⊘` in [`FAULT`] red, which does not mean "you have work" but that the applet cannot
-    ///   see. A producer that is absent or that exits non-zero is the failure that it reports.
-    fn badge(&self) -> (String, [u8; 3]) {
+    /// A snapshot answers for itself, because the count belongs to the rows that it holds. Only
+    /// [`Badge::Blind`] is decided here, because a failed poll is known here alone. This is the
+    /// one place that pairs a view with a badge; the pixmap, the title and the SNI status all
+    /// read that answer instead of matching on the view again.
+    fn badge(&self) -> Badge {
         match &self.view {
-            View::Broken(_) => ("\u{2298}".to_string(), FAULT),
-            View::Agents(s) => (s.badge_text(), BLOCKED),
+            View::Broken(_) => Badge::Blind,
+            View::Agents(s) => s.badge(),
         }
     }
 }
@@ -203,15 +202,22 @@ impl ksni::Tray for ClaudeTray {
     }
 
     fn icon_pixmap(&self) -> Vec<Icon> {
-        let (badge, rgb) = self.badge();
-        vec![self.renderer.render(&badge, rgb)]
+        let badge = self.badge();
+        vec![self.renderer.render(&badge.text(), badge.rgb())]
     }
 
+    /// The item in words. It says what the badge says, and not in the same way: this is the one
+    /// surface with room for a sentence, so a failed poll prints the reason here where the
+    /// badge has room only for `⊘`.
     fn title(&self) -> String {
         match &self.view {
-            View::Agents(s) if s.badge == 0 => "claude — nothing waiting".into(),
-            View::Agents(s) => format!("claude — {} waiting", s.badge),
             View::Broken(e) => format!("claude — {e}"),
+            View::Agents(s) => match s.badge() {
+                Badge::Waiting(n) => format!("claude — {n} waiting"),
+                // A snapshot never reports `Blind`: the producer answered, or there is no
+                // snapshot. Neither of the other two states has a number to print.
+                Badge::Quiet | Badge::Blind => "claude — nothing waiting".into(),
+            },
         }
     }
 
@@ -224,20 +230,15 @@ impl ksni::Tray for ClaudeTray {
     /// tray item is a `Gtk::Image`, so that class can only draw a border. The border is thus the
     /// second signal, below the badge: the pixmap gives the number, and the border says to look
     /// now.
+    ///
+    /// The badge decides this, and it decides it alone. A quiet mark is the only picture that
+    /// does not ask you to look, and [`Badge::needs_attention`] says so once for the pixmap and
+    /// for this. A failed producer thus keeps its border with no second match on the view.
     fn status(&self) -> Status {
-        match &self.view {
-            View::Agents(s) => {
-                if s.badge > 0 {
-                    Status::NeedsAttention
-                } else {
-                    Status::Active
-                }
-            }
-            // A failed producer also needs attention. It keeps the rule that `badge > 0` means
-            // that there is work, because this state has no badge: the applet draws `⊘` instead
-            // of a number, so nobody can read the colour as a count. Without this, the applet
-            // would look quiet while it cannot see.
-            View::Broken(_) => Status::NeedsAttention,
+        if self.badge().needs_attention() {
+            Status::NeedsAttention
+        } else {
+            Status::Active
         }
     }
 
@@ -308,13 +309,16 @@ fn quit() -> MenuItem<ClaudeTray> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{Status, Target};
+    // Renamed, because `super::*` also brings `ksni::Status` and the two are different types.
+    // Rust resolves the explicit import over the glob, so a test of `ClaudeTray::status` would
+    // otherwise fail with a confusing error about the wrong `Status`.
+    use crate::state::{Status as AgentStatus, Target};
 
     /// A row is built from a status word, as the real one is. There is no way to ask for a row
     /// that ranks as one status and reads as another.
     fn entry(status: &str, target: Option<Target>) -> Entry {
         Entry {
-            status: Status::parse(status.into()),
+            status: AgentStatus::parse(status.into()),
             title: "infra".into(),
             age_s: 60,
             target,
