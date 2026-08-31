@@ -50,7 +50,17 @@ pub struct Zellij {
 pub struct Row {
     /// The value from the producer, unchanged. `busy | idle | waiting | shell`, or a value that
     /// a later Claude Code version adds.
-    #[serde(rename = "status", default, deserialize_with = "null_as_empty")]
+    ///
+    /// Strict for the same reason as [`Row::transition_age_s`], and it had the same bug: with a
+    /// `#[serde(default)]` an absent `status` key read as `""`, `""` classifies as `Other`, and
+    /// `Other` is the one class the badge never counts. A rename of this key would thus empty
+    /// the badge, blank the status column and leave every row a quiet `Other`, with no error
+    /// anywhere. This field decides the badge, the sort, the glyph and the SNI status, so it
+    /// gets at least the strictness that `status_age` already has.
+    ///
+    /// A `null` status stays cheap, because the producer documents `null` as a value. Only the
+    /// absent key costs the poll.
+    #[serde(rename = "status", deserialize_with = "null_as_empty")]
     pub raw_status: String,
     /// Seconds in the current status.
     ///
@@ -188,12 +198,18 @@ mod tests {
     }
 
     /// The other half of that trade: an absent key that this build depends on is still an
-    /// error, because it changes what the applet shows.
+    /// error, because it changes what the applet shows. A renamed `status` used to read as `""`,
+    /// which classifies as `Other`, which the badge never counts, so a rename showed every live
+    /// agent with a blank status and a badge of zero.
     #[test]
-    fn a_renamed_key_is_still_an_error() {
+    fn a_renamed_status_key_stops_the_parse() {
         let renamed = OUT.replace(r#""status": "idle""#, r#""state": "idle""#);
-        assert!(matches!(parse(&renamed), Ok(rows) if rows[0].raw_status.is_empty()));
+        assert!(matches!(parse(&renamed), Err(Error::Parse(_))));
+    }
 
+    /// Output that is not JSON at all is the same event as a missing key: the applet says so.
+    #[test]
+    fn malformed_json_is_an_error() {
         assert!(matches!(parse("[{]"), Err(Error::Parse(_))));
     }
 
