@@ -17,6 +17,8 @@
 //! Each function here is pure and takes `now` as an argument, so each rule below is a test.
 
 use crate::agents::Row;
+use crate::icon::{BLOCKED, FAULT};
+use std::num::NonZeroUsize;
 
 /// Names truncate in the middle. The columns align only if the GTK menu font is monospace,
 /// which is a system setting and not a guarantee.
@@ -240,29 +242,101 @@ impl Entry {
     }
 }
 
-/// Everything the tray needs for one repaint, derived once so the badge and the list cannot
-/// disagree.
+/// What goes beside the mark, and in which colour. The mark is not part of this. It is
+/// identity, and it stays [`crate::mark::CLAUDE`] in each state. Three pictures can appear
+/// here, and each one has one meaning:
+///
+/// - [`Badge::Quiet`] draws nothing, which shows the mark alone. Nothing waits for you.
+/// - [`Badge::Waiting`] draws the count in [`BLOCKED`] amber. Each agent in that number waits
+///   for you.
+/// - [`Badge::Blind`] draws `⊘` in [`FAULT`] red. It does not mean "you have work". It
+///   means that the applet cannot see, which a producer that is absent or that exits non-zero
+///   causes.
+///
+/// The text and the colour are one value and not a pair, because only three of the pairs that a
+/// `(String, [u8; 3])` admits have a meaning. An amber `⊘` is a blind applet that reads as
+/// work, and a red count is a number in the colour that says "this is not a number". Both were
+/// forbidden by comment until this type made them unconstructible.
+///
+/// [`Badge::Waiting`] carries a [`NonZeroUsize`] for the same reason. A count of `0` and an
+/// empty text are one state, and it used to be spelled twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Badge {
+    /// Nothing waits for you, so the bar shows the mark alone.
+    Quiet,
+    /// This many agents wait for you. The number is never `0`, because that state is
+    /// [`Badge::Quiet`].
+    Waiting(NonZeroUsize),
+    /// The applet cannot see. [`crate::agents::poll`] failed, so there are no rows to count and
+    /// a quiet mark would be a lie.
+    Blind,
+}
+
+impl Badge {
+    /// What `crate::icon::Renderer::render` draws beside the mark.
+    pub fn text(self) -> String {
+        match self {
+            Badge::Quiet => String::new(),
+            Badge::Waiting(n) => n.to_string(),
+            Badge::Blind => "\u{2298}".to_string(),
+        }
+    }
+
+    /// The colour of that text. The colour is in the pixels because CSS cannot supply it; see
+    /// [`crate::icon`].
+    ///
+    /// [`Badge::Quiet`] has no text, so its colour never reaches a pixel. It answers with the
+    /// amber anyway. An `Option` here would make each caller unwrap a colour for a picture that
+    /// does not exist.
+    pub fn rgb(self) -> [u8; 3] {
+        match self {
+            Badge::Quiet | Badge::Waiting(_) => BLOCKED,
+            Badge::Blind => FAULT,
+        }
+    }
+
+    /// Does this state ask you to look? [`Badge::Quiet`] is the only state that does not.
+    ///
+    /// A failed producer asks. It keeps the rule that amber means work, because that state has
+    /// no count: the applet draws `⊘` instead of a number, so nobody can read the colour as
+    /// a count. Without this, the applet would look quiet while it cannot see.
+    pub fn needs_attention(self) -> bool {
+        !matches!(self, Badge::Quiet)
+    }
+}
+
+/// Everything the tray needs for one repaint: the rows, and the moment that they describe.
+///
+/// The badge is not one of the fields. [`Snapshot::badge`] counts the rows at each read, so the
+/// number in the bar and the list in the menu cannot disagree about one session. That is the
+/// failure that this module's header names, and a cached count is how it happens: a `Snapshot`
+/// built with the wrong one would compile.
+///
+/// The count does not need a cache. The menu rebuilds ten times a second over a handful of
+/// rows, so one `filter().count()` for each read is free.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     /// In `luneta`'s order: attention first, and most recent first within one status.
     pub entries: Vec<Entry>,
-    /// The number of actionable agents, which are the agents that wait for you.
-    pub badge: usize,
     /// Unix seconds at the time of the snapshot, so that [`Entry::label`] can show its age.
     pub taken_at: u64,
 }
 
 impl Snapshot {
-    /// What the pixmap shows beside the mark. It is empty when there is no work, because the
-    /// quiet state is the mark alone. A `0` is still something to read.
+    /// What goes beside the mark, derived from the rows that this snapshot holds.
     ///
-    /// Each agent in this number waits for you, so there is one badge colour. See
-    /// `crate::icon::BLOCKED`.
-    pub fn badge_text(&self) -> String {
-        if self.badge == 0 {
-            String::new()
-        } else {
-            self.badge.to_string()
+    /// A snapshot exists only where the producer answered, so this never gives
+    /// [`Badge::Blind`]. That state belongs to the tray, which is the one place that knows
+    /// about a failed poll.
+    pub fn badge(&self) -> Badge {
+        let waiting = self
+            .entries
+            .iter()
+            .filter(|e| e.status.state().is_actionable())
+            .count();
+        match NonZeroUsize::new(waiting) {
+            Some(n) => Badge::Waiting(n),
+            None => Badge::Quiet,
         }
     }
 
@@ -321,14 +395,8 @@ pub fn snapshot(rows: &[Row], now: u64) -> Snapshot {
     });
     name_rows(&mut entries);
 
-    let badge = entries
-        .iter()
-        .filter(|e| e.status.state().is_actionable())
-        .count();
-
     Snapshot {
         entries,
-        badge,
         taken_at: now,
     }
 }
@@ -442,6 +510,12 @@ mod tests {
         Status::parse(status.into()).state()
     }
 
+    /// A count for [`Badge::Waiting`]. Each one in the tests below is a literal that is not
+    /// zero, so the panic is unreachable.
+    fn waiting(n: usize) -> NonZeroUsize {
+        NonZeroUsize::new(n).expect("a waiting badge counts at least one agent")
+    }
+
     fn row(status: &str, transition_age_s: u64) -> Row {
         Row {
             raw_status: status.into(),
@@ -494,7 +568,7 @@ mod tests {
     fn an_idle_agent_is_never_counted_at_any_age() {
         for age in [0, 5, 3_600, 7 * 86_400] {
             let snap = snapshot(&[row("idle", age)], NOW);
-            assert_eq!(snap.badge, 0, "{age}s");
+            assert_eq!(snap.badge(), Badge::Quiet, "{age}s");
             assert_eq!(snap.entries[0].status.state(), State::Idle, "{age}s");
         }
     }
@@ -511,7 +585,7 @@ mod tests {
             row("shell", 5),
         ];
         let snap = snapshot(&rows, NOW);
-        assert_eq!(snap.badge, 2);
+        assert_eq!(snap.badge(), Badge::Waiting(waiting(2)));
         assert_eq!(snap.entries.len(), 5, "nothing is hidden, only uncounted");
     }
 
@@ -697,11 +771,32 @@ mod tests {
     }
 
     /// The quiet state is the mark alone and not a `0`, because a zero is still something to
-    /// read.
+    /// read. The type says it now: there is no `Waiting(0)` to draw.
     #[test]
     fn a_quiet_badge_is_empty_rather_than_zero() {
-        assert_eq!(snapshot(&[row("idle", 5)], NOW).badge_text(), "");
-        assert_eq!(snapshot(&[row("waiting", 5)], NOW).badge_text(), "1");
+        assert_eq!(snapshot(&[row("idle", 5)], NOW).badge().text(), "");
+        assert_eq!(snapshot(&[row("waiting", 5)], NOW).badge().text(), "1");
+    }
+
+    /// The three pictures that can appear beside the mark, and the colour of each one. The
+    /// amber `⊘` and the red count are not tested, because neither can be built.
+    #[test]
+    fn each_badge_state_draws_one_picture() {
+        assert_eq!(Badge::Quiet.text(), "");
+        assert_eq!(Badge::Waiting(waiting(3)).text(), "3");
+        assert_eq!(Badge::Waiting(waiting(3)).rgb(), BLOCKED);
+        assert_eq!(Badge::Blind.text(), "\u{2298}");
+        assert_eq!(Badge::Blind.rgb(), FAULT);
+    }
+
+    /// A failed producer asks you to look, and the quiet mark does not. `ClaudeTray::status`
+    /// reads this and nothing else, so the three states of the badge and the two SNI statuses
+    /// are decided in one place.
+    #[test]
+    fn only_the_quiet_badge_stays_silent() {
+        assert!(!Badge::Quiet.needs_attention());
+        assert!(Badge::Waiting(waiting(1)).needs_attention());
+        assert!(Badge::Blind.needs_attention());
     }
 
     /// The end of the name must stay: it holds a `:pane` suffix, and it is where two names from
