@@ -29,8 +29,9 @@
         pkgs,
         ...
       }: let
-        craneLib = (crane.mkLib pkgs).overrideToolchain (p:
-          p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml);
+        craneLib =
+          (crane.mkLib pkgs).overrideToolchain (p:
+            p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml);
 
         # `cleanCargoSource` alone keeps only Rust and Cargo files, so `assets/` does not reach
         # the builder and `include_str!` in src/mark.rs fails with "No such file or directory",
