@@ -16,9 +16,9 @@
     ...
   }:
     flake-parts.lib.mkFlake {inherit inputs;} {
-      # Linux only, like claude-ps and for the same reason once removed: this shells out
-      # to it, and it reads /proc. A darwin build would start, publish a tray item and report
-      # nothing forever, which is worse than not being offered.
+      # Linux only, like claude-ps, and for the same reason: this program runs claude-ps, and
+      # claude-ps reads /proc. A darwin build would start, publish a tray item and report
+      # nothing, which is worse than no build at all.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
@@ -32,10 +32,10 @@
         craneLib = (crane.mkLib pkgs).overrideToolchain (p:
           p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml);
 
-        # ⚠️ `cleanCargoSource` alone keeps only Rust and Cargo files, so `assets/` never
-        # reaches the builder and `include_str!` in src/mark.rs fails with a bare
-        # "No such file or directory" — a build error that says nothing about filtering.
-        # The mark is source, not a resource, so it has to be let through explicitly.
+        # `cleanCargoSource` alone keeps only Rust and Cargo files, so `assets/` does not reach
+        # the builder and `include_str!` in src/mark.rs fails with "No such file or directory",
+        # which says nothing about the filter. The mark is source and not a resource, so this
+        # code must pass it through.
         src = pkgs.lib.fileset.toSource {
           root = ./.;
           fileset = pkgs.lib.fileset.unions [
@@ -61,21 +61,21 @@
 
             nativeBuildInputs = [pkgs.makeWrapper];
 
-            # The Claude mark needs no font — it is rasterised from `assets/claude-mark.svg`.
-            # The badge does, so a font carrying ⊘ and the digits has to be *there*. Pinning it
-            # in the wrapper means the tray cannot come up blank because fontconfig on some
-            # other machine resolves DejaVu Sans elsewhere.
+            # The Claude mark needs no font, because src/mark.rs rasterises it from
+            # `assets/claude-mark.svg`. The badge does need one, so a font that carries ⊘ and the
+            # digits must be present. A pinned path in the wrapper prevents an empty tray if
+            # fontconfig on another machine finds DejaVu Sans in a different place.
             #
-            # ⚠️ This does NOT reach the menu, and the wording here used to claim it did. The
-            # menu is drawn by the tray host with the *system* font stack, so its 🙋 ☕ 🐚 🛸 and
-            # its braille spinner need a colour emoji font on the box — Pango tags them
-            # `lang=und-zsye` and resolves the `emoji` family, which on this one lands on
-            # Noto Color Emoji. Pinning it here would do nothing; there is no variable to set.
+            # This variable does not reach the menu. The tray host draws the menu with the system
+            # fonts, so its 🙋 ☕ 🐚 🛸 and its braille spinner need a colour emoji font on the
+            # machine. Pango marks them `lang=und-zsye` and resolves the `emoji` family, which
+            # here gives Noto Color Emoji. A pinned path here would have no effect, because there
+            # is no variable to set.
             #
-            # `claude-ps` is deliberately NOT pinned here. It is the thing this applet
-            # reads the world through, and Lorenzo upgrades it on its own cadence; wiring a
-            # store path in would mean rebuilding the tray to pick up a producer change.
-            # It is looked up on PATH, and a missing one is a state the tray renders as ⊘.
+            # This wrapper does not pin `claude-ps` on purpose. The applet reads the world
+            # through it, and it has its own release cadence. A store path here would need a
+            # rebuild of the tray for each change of the producer. It comes from PATH, and the
+            # tray shows an absent one as ⊘.
             postInstall = ''
               wrapProgram $out/bin/claude-tray \
                 --set-default CLAUDE_TRAY_FONT \
@@ -91,8 +91,8 @@
             };
           });
 
-        # One derivation for each gate, so CI builds them in parallel and a lint failure
-        # does not stop someone who only wants to build the crate.
+        # One derivation for each gate, so that CI builds them in parallel and a lint failure
+        # does not stop a build of the crate.
         gates = {
           inherit claude-tray;
 
@@ -108,9 +108,9 @@
               partitions = 1;
               partitionType = "count";
 
-              # The icon tests need a real font. Without this they are written to skip
-              # rather than fail, which would quietly cost the only coverage the renderer
-              # has — so hand them one in the sandbox instead.
+              # The icon tests need a real font. Without one they do not run, because they skip
+              # instead of a failure, and the renderer then has no test coverage. This variable
+              # gives them a font in the sandbox.
               CLAUDE_TRAY_FONT = "${pkgs.dejavu_fonts}/share/fonts/truetype/DejaVuSans.ttf";
             });
 

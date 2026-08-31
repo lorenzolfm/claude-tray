@@ -1,107 +1,100 @@
-//! The one thing this applet asks the outside world: *what is running right now?*
+//! The one question this applet asks the outside world: what runs now?
 //!
-//! 🔴 **This shells out to `claude-ps`; it never reads `~/.claude/sessions` itself.**
-//! That program already does the pid + `procStart` liveness check that keeps a recycled pid
-//! from passing a dead agent off as live, and already joins each agent to its zellij session
-//! and pane. Re-deriving any of that here would create a second source that can disagree with
-//! the first — and `luneta` is already the second consumer of the first.
+//! This module runs `claude-ps`. It does not read `~/.claude/sessions`. That program already
+//! does the pid and `procStart` liveness check that prevents a recycled pid from showing a dead
+//! agent as live, and it already joins each agent to its zellij session and pane. A second
+//! implementation here could disagree with the first, and `luneta` is already the second
+//! consumer of the first.
 //!
-//! What comes back is deliberately *raw*. `claude-ps` passes `status` through untouched and
-//! its README tells consumers not to match it against a fixed set. Interpreting it is
-//! [`crate::state`]'s job, not this module's. Everything here stays at the level of "a JSON
-//! array arrived, here are the keys this applet reads".
+//! The data stays raw. `claude-ps` passes `status` through unchanged, and its README tells
+//! consumers not to compare it against a fixed set. [`crate::state`] interprets it. This module
+//! only says which keys the applet reads out of the JSON array.
 
 use std::process::Command;
 
 use serde::{Deserialize, Deserializer};
 
-/// The program is looked up on `PATH` rather than pinned to a store path, so `claude-ps`
-/// can be upgraded underneath the applet without rebuilding it.
+/// The program comes from `PATH`, not from a pinned store path, so `claude-ps` can be upgraded
+/// without a rebuild of the applet.
 const PRODUCER: &str = "claude-ps";
 
-/// Where an agent is sitting, when it is sitting in zellij at all.
+/// Where an agent runs, when it runs in zellij at all.
 ///
-/// 🔴 One object, not two fields, and the producer emits it that way for the reason this
-/// applet needs: attaching to a session and focusing a pane is a **single act**, so a session
-/// without a pane is an address [`crate::jump`] cannot use. There is no state where one is
-/// known and the other is not.
+/// The producer sends one object, not two fields, and the applet needs it that way. An attach
+/// to a session and a focus of a pane are one operation, so a session without a pane is not an
+/// address that [`crate::jump`] can use. There is no state where one value is known and the
+/// other is not.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Zellij {
-    /// The zellij session name, and what `zellij attach` takes.
+    /// The zellij session name, which is what `zellij attach` takes.
     pub session: String,
-    /// `$ZELLIJ_PANE_ID`, which is exactly what `zellij action focus-pane-id` takes.
+    /// `$ZELLIJ_PANE_ID`, which is what `zellij action focus-pane-id` takes.
     pub pane: String,
 }
 
-/// One agent out of `claude-ps`, still uninterpreted.
+/// One agent from `claude-ps`, not yet interpreted.
 ///
-/// Only the keys this applet reads are kept; the rest of the object is ignored. ⚠️ That is
-/// the point of moving off positional columns — an unknown key costs nothing now, where a
-/// tenth column used to be a hard [`Error::Parse`] and a blind tray.
+/// Only the keys that the applet reads are kept, and the other keys are ignored. This is the
+/// reason to read the fields by name instead of by position: an unknown key now costs nothing,
+/// but a tenth column was an [`Error::Parse`] and an empty tray.
 ///
-/// 🔴 **`name` and `session` are two different things, and calling both of them "the session
-/// name" is what [[CSB-15]] cost.** `name` is Claude Code's label — for a *derived* one, the cwd
-/// basename plus a two-character suffix, so `…/infra.git/master` becomes `master-3c`.
-/// `zellij.session` is the zellij session that agent is sitting in, `infra`. Only the second is
-/// an address, and the first can be unrelated to it. [[CSB-2]] justified dropping `cwd` on the
-/// grounds that "the session name already *is* its basename", which is true of a derived `name`
-/// and false of `zellij.session`.
+/// `name` and `session` are different values. `name` is Claude Code's label. A derived label is
+/// the basename of the cwd plus a two-character suffix, so `…/infra.git/master` becomes
+/// `master-3c`. `zellij.session` is the zellij session that holds the agent, `infra`. Only
+/// `zellij.session` is an address, and the label can have no relation to it.
 ///
-/// ⚠️ `name_source` is what re-opened that question. A name a *person* chose is not the cwd
-/// twice over — it is the only string on the row that says what the agent is for — so the label
-/// is now the chosen name where there is one and the session where there is not. Which name is
-/// which is `name_source`'s answer and nobody else's; see `state::chosen_name`.
+/// `name_source` tells you who chose the label. A name that a person chose is the only string
+/// in the row that tells you the purpose of the agent. The applet thus shows the chosen name
+/// where there is one, and the session where there is not. See `state::chosen_name`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Row {
-    /// Verbatim from the producer. `busy | idle | waiting | shell`, or anything a future
-    /// Claude Code version invents.
+    /// The value from the producer, unchanged. `busy | idle | waiting | shell`, or a value that
+    /// a later Claude Code version adds.
     #[serde(rename = "status", default, deserialize_with = "null_as_empty")]
     pub raw_status: String,
-    /// Seconds in the *current* status.
+    /// Seconds in the current status.
     ///
-    /// ⚠️ Not time since the session started, and it does **not** advance during a busy turn —
-    /// `statusUpdatedAt` marks entry into a state. On a working row this reads as turn
-    /// duration, which is the only surface a wedged session shows up on.
+    /// This is not the time since the start of the session, and it does not increase during a
+    /// busy turn. `statusUpdatedAt` records the entry into a state. On a busy row this value is
+    /// the duration of the turn, which is the only indication that a session is stuck.
     ///
-    /// 🔴 **Deliberately not `#[serde(default)]`, and it is the one field here that is strict.**
-    /// It was defaulted, and the producer then renamed the key from `age` to `status_age`
-    /// underneath it — so every row deserialised to `0` and every menu line read `<1m` for every
-    /// agent, forever. A silent zero is worse than a stopped parse: it is not a blank the eye
-    /// skips, it is a confident answer that happens to be wrong, on the column that says whether
-    /// anything is wedged. Absent now costs the poll and puts the reason in the menu, which is
-    /// what the tolerance on every other field is *for* — an unknown key costs nothing precisely
-    /// so that a known one can be loud.
+    /// This is the one strict field here, and it has no `#[serde(default)]` on purpose. It had
+    /// a default, and the producer then changed the key from `age` to `status_age`. Each row
+    /// then deserialised to `0`, and each menu line showed `<1m` for each agent. A silent zero
+    /// is worse than a stopped parse, because it is a confident wrong answer in the column that
+    /// shows whether an agent is stuck. An absent key now costs the poll and puts the reason in
+    /// the menu, which is what the tolerance on the other fields is for.
     ///
-    /// The alias keeps a `claude-ps` older than that rename working, since neither side is
-    /// versioned against the other.
+    /// The alias keeps a `claude-ps` from before that change operational, because the two
+    /// programs have no common version.
     #[serde(rename = "status_age", alias = "age")]
     pub transition_age_s: u64,
-    /// `None` when the agent is not inside zellij — an ordinary state, not a failure. Such a
-    /// row still counts and still renders; it simply has nowhere to jump to.
+    /// `None` when the agent does not run in zellij. This is a usual state, not a failure. Such
+    /// a row still counts and still shows, but it has no jump target.
     #[serde(default)]
     pub zellij: Option<Zellij>,
-    /// Claude Code's label for the session — sometimes its own, sometimes a person's.
+    /// Claude Code's label for the session, which a person or the program can choose.
     ///
-    /// ⚠️ **Worth showing only when someone chose it** — see [`Row::name_source`] and
-    /// `state::name_rows`. A `derived` name is the cwd basename plus a suffix, and the row
-    /// already has an address of its own to be called by.
+    /// Show it only if a person chose it. See [`Row::name_source`] and `state::name_rows`. A
+    /// derived name is the basename of the cwd plus a suffix, and the row already has an
+    /// address of its own.
     #[serde(default, deserialize_with = "null_as_empty")]
     pub name: String,
-    /// Who chose [`Row::name`]: `user`, `peer`, `derived`, `collision`, `auto`, `hook`, or
-    /// anything a later Claude Code invents. `None` is the state before the key existed.
+    /// Who chose [`Row::name`]: `user`, `peer`, `derived`, `collision`, `auto`, `hook`, or a
+    /// value that a later Claude Code adds. `None` is the state before the key existed.
     ///
-    /// ⚠️ Optional on purpose, unlike `status_age`: `null` is a value the producer documents
-    /// rather than a key that went missing.
+    /// This field is optional, unlike `status_age`, because the producer documents `null` as a
+    /// value rather than as an absent key.
     #[serde(default)]
     pub name_source: Option<String>,
 }
 
-/// A `null` string from the producer becomes empty here rather than `Option`.
+/// A `null` string from the producer becomes an empty string here, not an `Option`.
 ///
-/// The producer emits `null` only where Claude Code's own file lacked the field entirely, which
-/// is a schema move rather than an ordinary state. The applet has no better answer than
-/// "unknown", and an empty status classifies as `Other` — never counted, so it renders the agent
-/// rather than inventing a badge for it.
+/// The producer sends `null` only where Claude Code's own file had no such field, which is a
+/// change of schema rather than a usual state. The applet has no better answer than "unknown".
+/// An empty status classifies as `Other`, which the badge never counts, so the applet shows the
+/// agent instead of a badge for it.
 fn null_as_empty<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
 }
@@ -183,9 +176,8 @@ mod tests {
         );
     }
 
-    /// 🔴 The inversion this change bought. Under positional columns a tenth column was a hard
-    /// error and a blind tray; the producer gaining `permission_mode` is exactly what that cost.
-    /// A key this build has never heard of is now a non-event.
+    /// Under positional columns a tenth column was a hard error and an empty tray. A key that
+    /// this build does not know is now no event at all.
     #[test]
     fn an_unknown_key_is_not_an_error() {
         let extended = OUT.replace(
@@ -195,8 +187,8 @@ mod tests {
         assert_eq!(parse(&extended).unwrap()[0].transition_age_s, 14493);
     }
 
-    /// ⚠️ The other half of that trade: a key this build *depends* on going missing is still
-    /// loud, because it changes what the applet would render.
+    /// The other half of that trade: an absent key that this build depends on is still an
+    /// error, because it changes what the applet shows.
     #[test]
     fn a_renamed_key_is_still_an_error() {
         let renamed = OUT.replace(r#""status": "idle""#, r#""state": "idle""#);
@@ -205,40 +197,40 @@ mod tests {
         assert!(matches!(parse("[{]"), Err(Error::Parse(_))));
     }
 
-    /// 🔴 The one field tolerance is *not* extended to, and the reason the rest of them can be
-    /// tolerant. `claude-ps` renaming `age` to `status_age` under a defaulted field turned every
-    /// row's age into a confident `0`; a stopped parse says so instead.
+    /// The one field with no tolerance, and the reason the other fields can have some. The
+    /// change from `age` to `status_age` under a defaulted field made each row's age a
+    /// confident `0`. A stopped parse reports the problem instead.
     #[test]
     fn a_missing_age_stops_the_parse_rather_than_reading_zero() {
         let aged_out = OUT.replace(r#""status_age": 14493,"#, "");
         assert!(matches!(parse(&aged_out), Err(Error::Parse(_))));
     }
 
-    /// The other side of that: a `claude-ps` from before the rename still works, because neither
-    /// side is versioned against the other.
+    /// A `claude-ps` from before that change still works, because the two programs have no
+    /// common version.
     #[test]
     fn the_age_key_before_the_rename_still_reads() {
         let old = OUT.replace(r#""status_age": 14493"#, r#""age": 14493"#);
         assert_eq!(parse(&old).unwrap()[0].transition_age_s, 14493);
     }
 
-    /// 🔴 No agents is `[]`, and must be an empty list rather than a failure — otherwise
-    /// "nothing is running" renders as "the producer is broken".
+    /// No agents is `[]`. It must give an empty list, not a failure, or the applet shows
+    /// "the producer is broken" when nothing runs.
     #[test]
     fn no_agents_is_an_empty_list_not_an_error() {
         assert_eq!(parse("[]\n"), Ok(Vec::new()));
     }
 
-    /// A `null` join is the producer saying "not inside zellij", not a parse failure. The row
-    /// still belongs in the list; it just cannot be jumped to.
+    /// A `null` join means "not in zellij", not a parse failure. The row stays in the list, but
+    /// it has no jump target.
     #[test]
     fn an_agent_outside_zellij_still_parses() {
         let outside = OUT.replace(r#"{ "session": "bipa", "pane": "0" }"#, "null");
         assert_eq!(parse(&outside).unwrap()[0].zellij, None);
     }
 
-    /// ⚠️ `null` is a value the producer documents for this key, not a key going missing — the
-    /// state before Claude Code recorded who named a session.
+    /// The producer documents `null` for this key. It is the state from before Claude Code
+    /// recorded who named a session.
     #[test]
     fn an_absent_name_source_is_not_a_failure() {
         let nulled = OUT.replace(r#""name_source": "derived""#, r#""name_source": null"#);
@@ -248,7 +240,8 @@ mod tests {
         assert_eq!(parse(&dropped).unwrap()[0].name_source, None);
     }
 
-    /// A `null` status is a schema move, not a reason to drop a live agent off the list.
+    /// A `null` status is a change of schema. It is not a reason to remove a live agent from
+    /// the list.
     #[test]
     fn a_null_string_costs_the_field_not_the_row() {
         let nulled = OUT.replace(r#""status": "idle""#, r#""status": null"#);

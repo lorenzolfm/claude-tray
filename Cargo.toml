@@ -7,13 +7,13 @@ license = "MIT"
 repository = "https://github.com/lorenzolfm/claude-tray"
 
 [dependencies]
-# `blocking` is additive, not a replacement: it layers a sync facade over the
-# async tray. Dropping the default `tokio` feature does not compile — zbus
-# falls through to an `async_io` module that is not built.
+# `blocking` adds to the crate and does not replace a part of it: it puts a
+# synchronous interface over the async tray. A build without the default `tokio`
+# feature fails, because zbus then uses an `async_io` module that is not built.
 ksni = { version = "0.3", features = ["blocking"] }
 ab_glyph = "0.2"
-# The producer speaks JSON. Deserialising it by name is what keeps a new key from
-# being a breaking change the way an appended column was.
+# The producer sends JSON. A deserialisation by name keeps a new key from a break
+# of compatibility, which an appended column caused.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
