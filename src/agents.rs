@@ -32,6 +32,31 @@ pub struct Zellij {
     pub pane: String,
 }
 
+impl Zellij {
+    /// This pair as an address that [`crate::jump`] can act on, or `None` when it is not one.
+    ///
+    /// A session name that holds whitespace is not an address. `jump::pair_sockets` splits the
+    /// rows of `ss -x -p` on spaces to learn which client is attached to which server socket,
+    /// and its own doc concedes that assumption: it holds for each path that zellij builds, and
+    /// not for each name that a person types. A session that breaks the split is joined to no
+    /// client, `jump::focus` thus finds no terminal showing it, and the last fallthrough there
+    /// attaches instead — which opens a *second* terminal for a session that is already on
+    /// screen. The click looks like it worked. An empty string is not an address for the plainer
+    /// reason that neither `zellij attach` nor `zellij action focus-pane-id` takes one.
+    ///
+    /// The producer sends the two values as one object, so they are judged as one: half an
+    /// address is no more usable than none, and [`crate::state::Target`] holds a pair.
+    ///
+    /// Rejected here rather than in [`Deserialize`], because the row is still worth showing. A
+    /// `snapshot` reads the raw session for the title and the address only through this method,
+    /// so an unaddressable session gives a grey row and keeps its name, instead of vanishing
+    /// from the menu with the poll.
+    pub fn address(&self) -> Option<&Self> {
+        let usable = |s: &str| !s.is_empty() && !s.contains(char::is_whitespace);
+        (usable(&self.session) && usable(&self.pane)).then_some(self)
+    }
+}
+
 /// One agent from `claude-ps`, not yet interpreted.
 ///
 /// Only the keys that the applet reads are kept, and the other keys are ignored. This is the
@@ -54,8 +79,9 @@ pub struct Row {
     /// Strict for the same reason as [`Row::transition_age_s`], and it had the same bug: with a
     /// `#[serde(default)]` an absent `status` key read as `""`, which parses as `Other`, and the
     /// badge counts `Waiting` alone. A rename of this key would thus empty the badge, blank the
-    /// status column and leave every row a quiet `Other`, with no error anywhere. This field decides the badge, the sort, the glyph and the SNI status, so it
-    /// gets at least the strictness that `status_age` already has.
+    /// status column and leave every row a quiet `Other`, with no error anywhere. This field
+    /// decides the badge, the sort, the glyph and the SNI status, so it gets at least the
+    /// strictness that `status_age` already has.
     ///
     /// A `null` status stays cheap, because the producer documents `null` as a value. Only the
     /// absent key costs the poll.
