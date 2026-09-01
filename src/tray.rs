@@ -39,6 +39,13 @@ pub struct Animation {
     /// one clock and the rows move together.
     frame: AtomicU64,
     /// Unix milliseconds at the last `AboutToShow`, or 0 if the menu never opened.
+    ///
+    /// The `0` carries one more case on purpose: a clock that could not be read when the menu
+    /// opened writes it too. Both mean the same thing to [`Animation::is_spinning`] — an open
+    /// far enough in the past to sit outside [`SPIN_AFTER_OPEN`], so the spinner stops — and
+    /// neither reader ever needs to tell them apart. Sharing the value is the choice, not the
+    /// coincidence: `0` is the oldest instant this field can hold, so every unknown open is the
+    /// most stale open, and no unknown can make the applet repaint for a menu nobody is reading.
     opened_at_ms: AtomicU64,
     /// Did the last poll find a row with a glyph that moves? Each place that replaces the view
     /// writes it — [`ClaudeTray::new`] for the first poll and [`ClaudeTray::refresh`] for the
@@ -64,7 +71,7 @@ impl Animation {
     /// looks at is not a reason for a repaint.
     pub fn is_spinning(&self) -> bool {
         self.spinning.load(Ordering::Relaxed)
-            && now_ms().saturating_sub(self.opened_at_ms.load(Ordering::Relaxed)) < SPIN_AFTER_OPEN
+            && opened_recently(now_ms(), self.opened_at_ms.load(Ordering::Relaxed))
     }
 }
 
@@ -166,13 +173,40 @@ fn now() -> u64 {
 
 /// Unix milliseconds, for [`SPIN_AFTER_OPEN`]. This uses the same clock as [`now`] and not an
 /// `Instant`, because the two sides of [`Animation`] are on different threads and an `Instant`
-/// is not a number that an atomic can hold. A clock that cannot be read gives the epoch here
-/// too, which puts each open outside the time limit and stops the spinner.
-fn now_ms() -> u64 {
+/// is not a number that an atomic can hold.
+///
+/// A clock that cannot be read is `None` and not a number. An earlier version answered `0`, and
+/// the arithmetic then read that failure backwards: `0.saturating_sub(opened_at_ms)` is `0`, and
+/// `0` is inside the time limit, so an unreadable clock held the spinner on for as long as the
+/// applet ran and repainted at each tick with the menu closed. Only a value that the caller
+/// cannot subtract keeps the failure from looking like a menu that opened this instant.
+fn now_ms() -> Option<u64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .ok()
+}
+
+/// Is the menu open recently enough for a spinner to be worth a repaint?
+///
+/// The time half of [`Animation::is_spinning`], apart from it so that a test can hand it a clock
+/// that failed and a menu that never opened. Neither case can be produced from a test otherwise:
+/// the clock is the real one, and `now` is read fresh at each call.
+///
+/// There is one rule, and it covers every failure: the elapsed time is either a real duration or
+/// the answer is no. A clock that could not be read has no duration to give, and a clock that
+/// went backwards between the open and this call gives one that is not a duration at all. Both
+/// are unknown, and an unknown open is a stale open.
+///
+/// The subtraction is `checked_sub` and not `saturating_sub` for that second case. Saturating
+/// turns "the clock moved back" into `0`, and `0` reads as an open that happened this instant —
+/// the loudest possible answer to the least trustworthy input. Being wrong the other way costs a
+/// spinner that stands still until the next `AboutToShow` writes a fresh time.
+fn opened_recently(now: Option<u64>, opened_at_ms: u64) -> bool {
+    match now.and_then(|now| now.checked_sub(opened_at_ms)) {
+        Some(open_for) => open_for < SPIN_AFTER_OPEN,
+        None => false,
+    }
 }
 
 /// One menu row. A click on it moves you to that session. See [`crate::jump`], which changes
@@ -278,7 +312,9 @@ impl ksni::Tray for ClaudeTray {
     /// the menu, and it starts the spinner. See [`SPIN_AFTER_OPEN`] for the signal that does not
     /// arrive.
     fn menu_about_to_show(&mut self) {
-        self.anim.opened_at_ms.store(now_ms(), Ordering::Relaxed);
+        self.anim
+            .opened_at_ms
+            .store(now_ms().unwrap_or(0), Ordering::Relaxed);
         self.refresh();
     }
 
@@ -401,5 +437,41 @@ mod tests {
         let later = label(&row(&entry("idle", somewhere()), 0, 120));
         assert!(fresh.ends_with("idle 1m"), "{fresh}");
         assert!(later.ends_with("idle 3m"), "{later}");
+    }
+
+    /// A menu that never opened is the oldest open there is, so nothing turns for it. This is
+    /// what the `0` in `opened_at_ms` buys, and what a clock that failed at `AboutToShow` also
+    /// writes.
+    #[test]
+    fn a_menu_that_never_opened_is_never_recent() {
+        assert!(!opened_recently(Some(1_700_000_000_000), 0));
+    }
+
+    /// The failure that this used to get wrong. A clock read as `0` made the subtraction
+    /// saturate to `0`, which is inside the limit, so an unreadable clock pinned the spinner on
+    /// and repainted at every tick for as long as the applet ran. `None` cannot be subtracted
+    /// from, so the answer is no whatever the menu did.
+    #[test]
+    fn a_clock_that_cannot_be_read_turns_nothing() {
+        assert!(!opened_recently(None, 0));
+        assert!(!opened_recently(None, 1_700_000_000_000));
+    }
+
+    /// A menu that opened this instant turns, and one that opened before the limit does not. The
+    /// boundary belongs to the past, so the limit exactly is already too old.
+    #[test]
+    fn only_an_open_inside_the_limit_turns() {
+        let now = 1_700_000_000_000;
+        assert!(opened_recently(Some(now), now));
+        assert!(opened_recently(Some(now), now - SPIN_AFTER_OPEN + 1));
+        assert!(!opened_recently(Some(now), now - SPIN_AFTER_OPEN));
+    }
+
+    /// A clock that went backwards between the open and the read is not a recent open either.
+    /// With `saturating_sub` this was the loudest answer — `0`, an open this instant — for the
+    /// least trustworthy input.
+    #[test]
+    fn a_clock_that_went_backwards_turns_nothing() {
+        assert!(!opened_recently(Some(1_000), 1_700_000_000_000));
     }
 }
