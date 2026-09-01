@@ -806,6 +806,24 @@ u_str LISTEN 0 128 /run/user/1000/zellij/c1/infra 700 * 0 users:((\"zellij\",pid
         assert!(live.is_empty(), "{live:?}");
     }
 
+    /// The reason for `agents::Zellij::address`. A session named `my work` puts a space in the
+    /// socket path, the split on whitespace then reads `work` where the inode belongs, and the
+    /// row is dropped: the client is joined to no session. `focus` finds no terminal showing
+    /// that session and attaches instead, which opens a second terminal for a session that is
+    /// already on screen. The applet therefore refuses such an address at the parse edge, and
+    /// the row is grey rather than a click that lies.
+    #[test]
+    fn a_session_named_with_a_space_is_never_joined_to_its_client() {
+        let ss = "\
+u_str ESTAB 0 0 /run/user/1000/zellij/c1/my work 324481 * 364748 users:((\"zellij\",pid=13253,fd=7))
+u_str ESTAB 0 0 * 364748 * 324481 users:((\"zellij\",pid=6435,fd=79))";
+        let live = pair_sockets(
+            ss,
+            &servers(&[("/run/user/1000/zellij/c1/my work", "my work")]),
+        );
+        assert!(live.is_empty(), "{live:?}");
+    }
+
     /// The table also holds sockets from other programs. This code must ignore them and the
     /// header row.
     #[test]

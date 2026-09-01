@@ -16,7 +16,7 @@
 //!
 //! Each function here is pure and takes `now` as an argument, so each rule below is a test.
 
-use crate::agents::Row;
+use crate::agents::{Row, Zellij};
 use crate::icon::{BLOCKED, FAULT};
 use std::num::NonZeroUsize;
 
@@ -378,12 +378,19 @@ pub fn snapshot(rows: &[Row], now: u64) -> Snapshot {
                 .or_else(|| row.zellij.as_ref().map(|z| z.session.clone()))
                 .unwrap_or_else(|| row.name.clone()),
             age_s: row.transition_age_s,
-            // One `map`, because the producer sends the pair as one object. There is no state
-            // where a session is known and its pane is not.
-            target: row.zellij.as_ref().map(|z| Target {
-                session: z.session.clone(),
-                pane: z.pane.clone(),
-            }),
+            // One `and_then`, because the producer sends the pair as one object and
+            // `Zellij::address` judges it as one. There is no state where a session is known
+            // and its pane is not, and none where half of an address is usable. The title
+            // above still reads the raw session, so a row that no click can reach keeps the
+            // name that says which agent it is.
+            target: row
+                .zellij
+                .as_ref()
+                .and_then(Zellij::address)
+                .map(|z| Target {
+                    session: z.session.clone(),
+                    pane: z.pane.clone(),
+                }),
         })
         .collect();
 
@@ -500,7 +507,6 @@ fn truncate(name: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::Zellij;
 
     const NOW: u64 = 1_800_000_000;
 
@@ -723,6 +729,67 @@ mod tests {
         let snap = snapshot(&[r], NOW);
         assert_eq!(snap.entries[0].title, "n");
         assert_eq!(snap.entries[0].target, None);
+    }
+
+    /// The address `claude-ps` sends is not always one that a click can use, and a row that
+    /// cannot be reached must say so by going grey. A session name that holds a space is the
+    /// writer: `pair_sockets` splits the `ss` rows on spaces, never joins that client to its
+    /// server, and `focus` then attaches — a second terminal for a session already on screen.
+    /// The name survives, because it is still the only word that says which agent the row is.
+    #[test]
+    fn a_session_named_with_whitespace_loses_the_jump_and_keeps_the_name() {
+        let mut r = row("idle", 5);
+        r.name_source = None;
+        r.name = "n".into();
+        r.zellij = Some(Zellij {
+            session: "my work".into(),
+            pane: "0".into(),
+        });
+        let snap = snapshot(&[r], NOW);
+        assert_eq!(snap.entries[0].target, None);
+        assert_eq!(snap.entries[0].title, "n");
+
+        // And the title fallback reaches the raw session when no person named the agent.
+        let mut derived = row("idle", 5);
+        derived.zellij = Some(Zellij {
+            session: "my work".into(),
+            pane: "0".into(),
+        });
+        let snap = snapshot(&[derived], NOW);
+        assert_eq!(snap.entries[0].target, None);
+        assert_eq!(snap.entries[0].title, "my work");
+    }
+
+    /// An empty string is not an address either, and half an address is none: the pair is
+    /// judged as the one object the producer sends it as.
+    #[test]
+    fn an_empty_session_or_pane_is_no_address() {
+        for (session, pane) in [("", "0"), ("s", ""), ("", "")] {
+            let mut r = row("idle", 5);
+            r.zellij = Some(Zellij {
+                session: session.into(),
+                pane: pane.into(),
+            });
+            let snap = snapshot(&[r], NOW);
+            assert_eq!(
+                snap.entries[0].target, None,
+                "session {session:?} pane {pane:?}"
+            );
+        }
+    }
+
+    /// The other half of that rule: an address that the jump can act on is passed through
+    /// whole, so the guard above rejects and does not merely narrow.
+    #[test]
+    fn an_ordinary_row_keeps_the_address_it_was_given() {
+        let snap = snapshot(&[row("idle", 5)], NOW);
+        assert_eq!(
+            snap.entries[0].target,
+            Some(Target {
+                session: "s".into(),
+                pane: "0".into(),
+            })
+        );
     }
 
     /// When two rows share a name, each of those rows takes a suffix. A rule that leaves the

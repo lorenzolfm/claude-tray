@@ -320,6 +320,14 @@ shows now. The live session comes from the socket instead: a client connects to 
 `/proc/net/unix` does not hold peer inodes, and only `ss` does, over sock_diag netlink, so the
 jump runs `ss`.
 
+That pairing splits the rows of `ss -x -p` on whitespace, which holds for each socket path that
+zellij builds and not for each session name that a person types. A session named `my work` is
+therefore joined to no client: the jump finds no terminal showing it and falls through to
+`attach`, which opens a *second* terminal for a session that is already on screen, and the click
+looks like it worked. The applet refuses such an address instead. A session or pane that is empty
+or holds whitespace is not addressable, so its row is grey and inert. It keeps its name, and only
+the jump is lost — which was already lost, silently, plus a stray terminal.
+
 zellij sends `switch-session` to the last client that pressed a key in that session, and a client
 that arrived by a change of session has pressed none. The jump therefore sends a `Ctrl e` pair,
 which is a binding that zellij consumes and which never reaches the pane, and it then verifies
