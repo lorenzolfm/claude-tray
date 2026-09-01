@@ -79,8 +79,9 @@ pub struct Row {
     /// Strict for the same reason as [`Row::transition_age_s`], and it had the same bug: with a
     /// `#[serde(default)]` an absent `status` key read as `""`, which parses as `Other`, and the
     /// badge counts `Waiting` alone. A rename of this key would thus empty the badge, blank the
-    /// status column and leave every row a quiet `Other`, with no error anywhere. This field decides the badge, the sort, the glyph and the SNI status, so it
-    /// gets at least the strictness that `status_age` already has.
+    /// status column and leave every row a quiet `Other`, with no error anywhere. This field
+    /// decides the badge, the sort, the glyph and the SNI status, so it gets at least the
+    /// strictness that `status_age` already has.
     ///
     /// A `null` status stays cheap, because the producer documents `null` as a value. Only the
     /// absent key costs the poll.
