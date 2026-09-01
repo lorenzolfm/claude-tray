@@ -40,8 +40,9 @@ pub struct Animation {
     frame: AtomicU64,
     /// Unix milliseconds at the last `AboutToShow`, or 0 if the menu never opened.
     opened_at_ms: AtomicU64,
-    /// Did the last poll find a row with a glyph that moves? [`ClaudeTray::refresh`] writes it,
-    /// so it is one poll old at worst. An old `true` costs one repaint and not a wrong
+    /// Did the last poll find a row with a glyph that moves? Each place that replaces the view
+    /// writes it — [`ClaudeTray::new`] for the first poll and [`ClaudeTray::refresh`] for the
+    /// rest — so it is one poll old at worst. An old `true` costs one repaint and not a wrong
     /// picture.
     spinning: AtomicBool,
 }
@@ -70,9 +71,41 @@ impl Animation {
 /// What the last poll found. An error is a state that the tray shows and not a reason to exit.
 /// An absent `claude-ps` on `PATH` is the most probable failure, and a tray that stayed quiet
 /// would hide the state that the applet exists to show.
+///
+/// `Broken` keeps [`agents::Error`] and not the sentence that it prints. The two surfaces that
+/// show a failure only format it, so the type costs nothing today; it is here because the poll
+/// is the one place that knows which failure occurred, and a `String` at that boundary is the
+/// point where the knowledge is cheapest to keep and most expensive to recover. A producer that
+/// is not on `PATH` is permanent and asks the person to install it; one that exited 3 is
+/// probably the next poll's success. Only the variant separates them.
+///
+/// There is no fourth state for "the poll has not run yet", because [`ClaudeTray::new`] builds
+/// this from [`look`] before the tray exists. A view is thus always an answer.
 enum View {
     Agents(Snapshot),
-    Broken(String),
+    Broken(agents::Error),
+}
+
+impl View {
+    /// Does this view hold a glyph that moves? A failed producer has no rows and thus no
+    /// spinner. See [`Animation::spinning`] for why the answer is stored and not asked for.
+    fn spins(&self) -> bool {
+        match self {
+            View::Agents(s) => s.any_spinning(),
+            View::Broken(_) => false,
+        }
+    }
+}
+
+/// Ask the producer once and classify what it says.
+///
+/// This is a free function and not a method so that [`ClaudeTray::new`] can call it before there
+/// is a tray to call it on, which is what removes the placeholder state.
+fn look() -> View {
+    match agents::poll() {
+        Ok(rows) => View::Agents(snapshot(&rows, now())),
+        Err(e) => View::Broken(e),
+    }
 }
 
 pub struct ClaudeTray {
@@ -82,32 +115,28 @@ pub struct ClaudeTray {
 }
 
 impl ClaudeTray {
+    /// The first poll happens here, and its answer is the first view. An earlier version seeded
+    /// a `Broken("not polled yet")` and overwrote it on the next line, which made the placeholder
+    /// unobservable but representable; now it is neither.
     pub fn new(renderer: Renderer, anim: Arc<Animation>) -> Self {
-        let mut tray = Self {
+        let view = look();
+        anim.spinning.store(view.spins(), Ordering::Relaxed);
+        Self {
             renderer,
-            view: View::Broken("not polled yet".into()),
+            view,
             anim,
-        };
-        tray.refresh();
-        tray
+        }
     }
 
     /// Ask the producer, classify, and keep the result.
     pub fn refresh(&mut self) {
-        self.view = match agents::poll() {
-            Ok(rows) => View::Agents(snapshot(&rows, now())),
-            Err(e) => View::Broken(e.to_string()),
-        };
+        self.view = look();
         // Write the value instead of a read by the loop, for the reason in [`Animation`]: the
-        // loop cannot read it without a repaint. A failed producer has no rows and thus no
-        // spinner.
-        self.anim.spinning.store(
-            match &self.view {
-                View::Agents(s) => s.any_spinning(),
-                View::Broken(_) => false,
-            },
-            Ordering::Relaxed,
-        );
+        // loop cannot read it without a repaint. Each place that replaces the view must write
+        // this too, or the flag describes the poll before it.
+        self.anim
+            .spinning
+            .store(self.view.spins(), Ordering::Relaxed);
     }
 
     /// Which of the three states the badge is in. [`Badge`] holds what each one draws, and
