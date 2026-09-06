@@ -24,86 +24,41 @@ With many concurrent Claude Code sessions inside zellij, there is no way to see 
 need input and which have finished without a visit to each one. This program shows that state
 in the bar.
 
-## It does not read the session registry
+## It decides nothing about the agents
 
-The program runs [`claude-ps`](https://github.com/lorenzolfm/claude-ps) and reads the JSON that
-it prints.
+The program links [`claude-nav`](https://github.com/lorenzolfm/claude-nav), which runs
+[`claude-ps`](https://github.com/lorenzolfm/claude-ps) and decides what its answer means: what
+each row is called, which status is `waiting`, where a row sorts, and where a click goes.
 
-That program already does the pid and `procStart` liveness check that prevents a recycled pid
-from showing a dead agent as live, and it already joins each agent to its zellij session and
-pane. A second implementation here could disagree with the first, and
-[`luneta`](https://github.com/lorenzolfm/luneta) is already the second consumer of the first. One
+Both halves of that are shared on purpose, and neither one is shared for tidiness.
+
+`claude-ps` already does the pid and `procStart` liveness check that prevents a recycled pid from
+showing a dead agent as live, and it already joins each agent to its zellij session and pane. One
 joiner serves many consumers.
 
-`claude-ps` comes from `PATH` and is not pinned, so you can upgrade it without a rebuild of the
-applet.
+`claude-nav` is the second layer of the same argument. [`luneta`](https://github.com/lorenzolfm/luneta)'s
+agents tab, this applet and the vicinae extension are three surfaces that must give one picture:
+the same agent, in the same place, with the same word. The vocabulary and the jump therefore live
+in one crate, and this repository holds no copy of either. When an earlier version of this
+program did add two states of its own, the same agent read as `your turn` here and `idle` in the
+picker.
 
-## What a row is called
+Neither program is pinned by the nix package. `claude-ps` comes from `PATH`, so you can upgrade it
+without a rebuild of the applet; `claude-nav` is compiled in, because a menu row is a Rust value
+here and not a line of JSON.
 
-`claude-ps` reports the `name` of the agent and who chose it, and the second value is the
-important one. A row thus takes a name in three steps:
+## What is left to decide
 
-1. the name that a person chose (a `name_source` of `user` or `peer`), which is the only string
-   in the row that gives the purpose of the agent;
-2. or the zellij session that holds the agent, which is what you navigate by;
-3. or Claude Code's own label, for an agent outside zellij that would otherwise have no name.
+Three things, and each one is ink:
 
-A `derived` name is the cwd basename plus a two-character suffix. A row with that name would
-carry the name of a directory that holds it by chance: `…/infra.git/master` would show
-`master-3c` for a session that you reach as `infra`. This rule comes from
-[`luneta`](https://github.com/lorenzolfm/luneta).
+| | |
+|---|---|
+| the badge | what the count means, and its colour |
+| `src/menu.rs` | the column width, and a spinner heavy enough for a GTK menu |
+| `src/mark.rs`, `src/icon.rs` | the mark, rasterised at `icon-size` |
 
-An unknown `name_source` is suppressed, which is the opposite of the treatment of an unknown
-status. The producer causes that difference, and it is correct on both sides. Each status value
-is a real state, so a hidden value hides a live agent. But the sources that carry a chosen name
-are a short closed list (`user`, `peer`), and the sources that carry a generated name are a long
-open one: Claude Code already writes `derived`, `collision`, `auto` and `hook`. A new source is
-more probably a generated name. An absent source is trusted, because it is the state from before
-the key existed and not a value that this build failed to recognise.
-
-When two rows in the menu take the same name, each of those rows takes a `:pane` suffix. A rule
-that leaves the first row without one is not a rule that a person can see in the menu.
-
-## What it decides
-
-`claude-ps` passes `status` through unchanged and tells consumers not to compare it against a
-fixed set. The mapping thus lives in `src/state.rs` and in no other file. The code that draws the
-badge must be the code that builds the menu, or the count and the list can disagree about one
-session.
-
-| raw status | | shown as | sorts | counted |
-|---|---|---|---|---|
-| `waiting` | | 🙋 `waiting` | 1st | ✅ |
-| `idle` | | ☕ `idle` | 2nd | — |
-| `busy` | | ⣾ `busy` | 3rd | — |
-| `shell` | | 🐚 `shell` | last | — |
-| anything else | | 🛸 *itself* | last | — |
-
-The states and the order come from [`luneta`](https://github.com/lorenzolfm/luneta). Its agents
-tab is the standard, and this program uses its table without a change, including the comparison
-that ignores case. The same agent in the picker and here must give the same picture in the same
-place, and a vocabulary that differs between two surfaces is worse than no vocabulary.
-
-An earlier design added two states of its own, `your turn` and `dormant`, which held this
-program's own decisions about `idle`: counted for the first hour, suppressed for the first thirty
-seconds of the life of a session, and hidden after that. Those three thresholds were estimates,
-and the picker knew none of them, so one agent was `your turn` on one surface and `idle` on the
-other. The word in a row now comes from the producer, unchanged.
-
-There is one exception, and it concerns ink and not meaning. The busy cycle here is `⣾⣽⣻⢿⡿⣟⣯⣷`
-where the picker's is `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`: seven dots in each frame instead of three. The GTK theme
-draws a menu row in its own foreground colour, and three dots become grey specks that may or may
-not turn. Colour is the smaller change and is not available: Waybar draws this menu through
-`libdbusmenu-gtk3`, which calls `g_markup_escape_text` on each label, so markup for one glyph
-shows as angle brackets. The one colour that dbusmenu gives, `disposition`, paints the full row.
-Which status turns is still the picker's decision, and only the weight of the frames belongs to
-this program.
-
-The spinner turns at ten frames a second, and only while the menu is open: `AboutToShow` is the
-one signal that says that a person looks at the menu. There is no matching signal for a close,
-because `ksni` 0.3.6 sends only `clicked` out of `Event`, so the spinner turns for one minute
-after the last open and then stops. Each other tick is cheap: the producer still runs once every
-five seconds, and a tick with no spinner on screen does not rebuild the menu.
+Everything else — the 🙋 ☕ 🐚 🛸, the order of the rows, the `<1m` / `47m` / `3h` / `2d` of the
+age column, which rows are grey — is `claude-nav`'s answer, rendered.
 
 ### The badge counts `waiting`, and nothing else
 
@@ -111,64 +66,47 @@ This is the one decision that this program adds to the picker's order, and it is
 the applet: `badge > 0` means that an agent waits for you, and a `waiting` agent has a question
 pending.
 
-The badge does not count `idle`. A finished turn is sufficient for a row above the working rows,
-which is why it sorts second, but it is not sufficient for a number in the bar, because nothing
-ends that state. That is what the old timeout of one hour and the old delay for new sessions
-were for: to keep a session that you finished on Tuesday quiet on Thursday, and to keep a session
-that you just opened quiet about itself. Both values were estimates of how long a person stays
-interested. A count of `waiting` alone needs neither.
-
-There is thus one badge colour where there were two. Each agent in the count waits for you, so
+The badge does not count `idle`, at any age. That rule is
+[`claude-nav`'s](https://github.com/lorenzolfm/claude-nav#waiting-is-the-only-status-that-counts)
+and the reasoning is there; what belongs here is the consequence. There is one badge colour where
+there were two, because the number has one meaning: each agent in the count waits for you, so
 amber alone reports it.
 
-Three rules are important, and a test verifies each one:
-
-- An unknown status sorts last, and the badge never counts it. The status vocabulary is open and
-  changes with the releases of Claude Code, which added `shell` between two of them. A new word
-  is thus only a question of time. Last place fails quietly, but a count would make a badge out
-  of a spelling error. The menu still shows the row, with the status itself as its word.
-- Case never decides what a status is. The picker compares each status with
-  `eq_ignore_ascii_case`, so this program does the same. A status that one surface recognises and
-  the other does not is a second mapping.
-- The menu hides nothing. Uncounted is not absent: each live agent takes a row, and you can click
-  each row that has an address. The only grey rows are agents outside zellij, which have no
-  destination, and grey there means that the row does nothing.
+The menu hides nothing. Uncounted is not absent: each live agent takes a row, and you can click
+each row that has an address. The only grey rows are agents outside zellij, which have no
+destination, and grey there means that the row does nothing.
 
 The list is a mirror. There is no dismiss and no unread, and an open of the menu changes nothing.
 The count is always the pending work.
 
-## Ordering
+## The spinner is heavier here
 
-The order is this program's responsibility. `claude-ps` sorts by pid, so that two runs one second
-apart give a clean difference, and its README says that this order is for comparison and not for
-reading.
+`claude-nav` says which status turns and does not say how many dots turn, and this is the one
+place where this applet differs from the picker on purpose.
 
-The order comes from the picker, in both parts: attention first, and most recent first within one
-status. The agent that changed a moment ago is the agent that you last worked with.
+The busy cycle here is `⣾⣽⣻⢿⡿⣟⣯⣷` where the picker's is `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`: seven dots in each frame
+instead of three. The GTK theme draws a menu row in its own foreground colour, and three dots
+become grey specks that may or may not turn. Colour is the smaller change and is not available:
+Waybar draws this menu through `libdbusmenu-gtk3`, which calls `g_markup_escape_text` on each
+label, so markup for one glyph shows as angle brackets. The one colour that dbusmenu gives,
+`disposition`, paints the full row.
 
-The second part is a reversal. This menu put the oldest row of a group first, because that row
-had waited longest. The picker's rule won, because the picker is where the navigation happens and
-two surfaces that disagree about the first row are worse than either rule alone. Equal ages keep
-the producer's pid order, so two agents that changed in the same second do not exchange places
-between polls.
-
-The rows are one flat list, as in the picker. There are no dividers between groups, because the
-glyph and the word already show the group of a row.
+The spinner turns at ten frames a second, and only while the menu is open: `AboutToShow` is the
+one signal that says that a person looks at the menu. There is no matching signal for a close,
+because `ksni` 0.3.6 sends only `clicked` out of `Event`, so the spinner turns for one minute
+after the last open and then stops. Each other tick is cheap: the producer still runs once every
+five seconds, and a tick with no spinner on screen does not rebuild the menu.
 
 ## The age column moves
 
-Each row ends with the time that the agent has been in its current status: `<1m`, `47m`, `3h`,
-`2d`. On a `busy` row that is the duration of the turn, and it is the only indication that a
-session is stuck.
-
-The value is the age in the snapshot plus the time since the snapshot. `claude-ps` runs once
-every five seconds and once more as the menu opens, and the menu then rebuilds ten times a second
-from that one answer. Without the offset, an agent that has waited three minutes would show the
-same number for as long as you look at it, in the one column that reports whether an agent is
-stuck.
+Each row ends with the time that the agent has been in its current status. The value is the age
+in the snapshot plus the time since the snapshot, because `claude-ps` runs once every five
+seconds and once more as the menu opens, and the menu then rebuilds ten times a second from that
+one answer. Without the offset, an agent that has waited three minutes would show the same number
+for as long as you look at it, in the one column that reports whether an agent is stuck.
 
 The addition is safe because it is the same number in each row. An equal offset cannot change a
-comparison, so the order above stays the same and only the ages move.
+comparison, so the order stays the same and only the ages move.
 
 ## The mark
 
@@ -305,58 +243,16 @@ Each item below was measured in a real Waybar 0.15.0.
 
 ## Jumping to a pane
 
-A click on a row moves you to that agent. There is one terminal and many sessions, so the rule is
-to change the session in the terminal that you have, and to open a terminal only if there is
-none. There is no rule to select between windows, because there is nothing to select.
+A click on a row calls `claude_nav::jump::focus`, which changes the session in the terminal that
+you have and opens one only if there is none. The four silent failures it was written against —
+the `argv` of a zellij client naming the wrong session, a session name with whitespace, a
+`switch-session` that reaches a client which has pressed no key, and a `hyprctl` that cannot
+inherit `HYPRLAND_INSTANCE_SIGNATURE` — are documented
+[there](https://github.com/lorenzolfm/claude-nav#jumping-to-a-pane).
 
-`zellij.pane` is `$ZELLIJ_PANE_ID`, which is what `zellij action focus-pane-id` takes, addressed
-at a session by name from outside it. The producer sends it with `zellij.session` in one object,
-or it sends `null`. A row thus has a full address or none, and the jump has no half-answer to
-handle.
-
-The `argv` of a zellij client names the session that it attached to first, not the session that it
-shows now. The live session comes from the socket instead: a client connects to exactly one
-`zellij --server <path>/<session>`, so a pair of the two ends of that socket gives the session.
-`/proc/net/unix` does not hold peer inodes, and only `ss` does, over sock_diag netlink, so the
-jump runs `ss`.
-
-That pairing splits the rows of `ss -x -p` on whitespace, which holds for each socket path that
-zellij builds and not for each session name that a person types. A session named `my work` is
-therefore joined to no client: the jump finds no terminal showing it and falls through to
-`attach`, which opens a *second* terminal for a session that is already on screen, and the click
-looks like it worked. The applet refuses such an address instead. A session or pane that is empty
-or holds whitespace is not addressable, so its row is grey and inert. It keeps its name, and only
-the jump is lost — which was already lost, silently, plus a stray terminal.
-
-zellij sends `switch-session` to the last client that pressed a key in that session, and a client
-that arrived by a change of session has pressed none. The jump therefore sends a `Ctrl e` pair,
-which is a binding that zellij consumes and which never reaches the pane, and it then verifies
-the change: it reads the live session of the client again instead of trust in the exit code.
-
-`zellij` exits 0 when the session does not exist and prints the session list instead. Only a
-wrong pane id exits non-zero. A focus that succeeds is silent on both streams, so this code tests
-for silence.
-
-### `hyprctl` needs a signature that this process cannot inherit
-
-This failure stopped each click, and you must read it before you change the unit file. The jump
-asks Hyprland which pids own windows and then raises one, and `hyprctl` finds the compositor
-through `HYPRLAND_INSTANCE_SIGNATURE`. systemd starts the user session at boot, and Hyprland is a
-process inside it, so the environment of the unit is fixed before the compositor exists and never
-receives the signature. An `import-environment` would have to run after the applet and not before
-it.
-
-The failure was also silent. `hyprctl` prints `HYPRLAND_INSTANCE_SIGNATURE not set!` on stdout
-and exits 0: the exit code reports success, and the answer is text. No code in the jump thus reads
-an exit code from it. Each call examines the output instead, and text is not a window list.
-
-The applet therefore finds the signature itself, in `$XDG_RUNTIME_DIR/hypr`, which holds one
-directory for each instance with the signature as its name. A directory is not an instance, but a
-socket is. Hyprland leaves the directory and its log after it exits, so a machine with a restart
-of the compositor has several directories and only one of them accepts a connection. A test for
-`.socket.sock` removes the old directories, and the newest of the remainder is the live one. An
-environment that has the variable always wins, because that is the compositor that the person
-looks at.
+One of them reaches this repository, and it is the reason for the paragraph about `PATH` under
+*Autostart*: the jump needs `zellij`, `ss`, `hyprctl` and a terminal, and a systemd user unit on
+NixOS has none of them.
 
 ## Licence
 

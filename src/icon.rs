@@ -1,5 +1,6 @@
 use crate::mark;
 use ab_glyph::{Font as _, FontRef, PxScale, ScaleFont, point};
+use claude_nav::state::Badge;
 use ksni::Icon;
 
 pub const HEIGHT: u32 = 20;
@@ -157,9 +158,55 @@ fn fc_match() -> Option<String> {
     (!path.is_empty()).then_some(path)
 }
 
+/// What the badge says.
+///
+/// A quiet badge is empty and not `0`: the mark alone is the statement that
+/// nothing waits for you. `⊘` is a third statement again — the applet cannot
+/// see — and it is not a count of none.
+pub fn badge_text(badge: Badge) -> String {
+    match badge {
+        Badge::Quiet => String::new(),
+        Badge::Waiting(n) => n.to_string(),
+        Badge::Blind => "\u{2298}".to_string(),
+    }
+}
+
+/// The colour of the badge, which is in the pixels because CSS cannot supply
+/// it: a tray item is a `Gtk::Image`, and `color` styles text, so it never
+/// touches the ink.
+///
+/// Two colours, because the count has one meaning. Each agent in it waits for
+/// you, so amber alone reports it.
+pub fn badge_rgb(badge: Badge) -> [u8; 3] {
+    match badge {
+        Badge::Quiet | Badge::Waiting(_) => BLOCKED,
+        Badge::Blind => FAULT,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroUsize;
+
+    fn waiting(n: usize) -> Badge {
+        Badge::Waiting(NonZeroUsize::new(n).expect("a waiting badge counts at least one agent"))
+    }
+
+    #[test]
+    fn a_quiet_badge_is_empty_rather_than_zero() {
+        assert_eq!(badge_text(Badge::Quiet), "");
+        assert_eq!(badge_text(waiting(1)), "1");
+        assert_eq!(badge_text(waiting(3)), "3");
+        assert_eq!(badge_text(Badge::Blind), "\u{2298}");
+    }
+
+    #[test]
+    fn a_count_is_amber_and_only_a_fault_is_red() {
+        assert_eq!(badge_rgb(Badge::Quiet), BLOCKED);
+        assert_eq!(badge_rgb(waiting(3)), BLOCKED);
+        assert_eq!(badge_rgb(Badge::Blind), FAULT);
+    }
 
     fn renderer() -> Option<Renderer> {
         Renderer::load().ok()

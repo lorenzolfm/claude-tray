@@ -1,8 +1,6 @@
-mod agents;
 mod icon;
-mod jump;
 mod mark;
-mod state;
+mod menu;
 mod tray;
 
 use ksni::blocking::TrayMethods;

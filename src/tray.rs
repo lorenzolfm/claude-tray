@@ -1,6 +1,7 @@
-use crate::icon::Renderer;
-use crate::state::{Badge, Entry, Snapshot, snapshot};
-use crate::{agents, jump};
+use crate::icon::{Renderer, badge_rgb, badge_text};
+use crate::menu::label;
+use claude_nav::state::{Badge, Entry, Snapshot, snapshot};
+use claude_nav::{agents, jump};
 use ksni::menu::StandardItem;
 use ksni::{Icon, MenuItem, Status};
 use std::sync::Arc;
@@ -107,7 +108,7 @@ fn opened_recently(now: Option<u64>, opened_at_ms: u64) -> bool {
 fn row(entry: &Entry, frame: u64, since: u64) -> MenuItem<ClaudeTray> {
     let target = entry.target.clone();
     StandardItem {
-        label: entry.label(frame, since),
+        label: label(entry, frame, since),
         enabled: target.is_some(),
         activate: Box::new(move |_: &mut ClaudeTray| {
             if let Some(t) = &target
@@ -143,7 +144,7 @@ impl ksni::Tray for ClaudeTray {
 
     fn icon_pixmap(&self) -> Vec<Icon> {
         let badge = self.badge();
-        vec![self.renderer.render(&badge.text(), badge.rgb())]
+        vec![self.renderer.render(&badge_text(badge), badge_rgb(badge))]
     }
 
     fn title(&self) -> String {
@@ -216,7 +217,7 @@ fn quit() -> MenuItem<ClaudeTray> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{Status as AgentStatus, Target};
+    use claude_nav::state::{Status as AgentStatus, Target};
 
     fn entry(status: &str, target: Option<Target>) -> Entry {
         Entry {
@@ -241,13 +242,6 @@ mod tests {
         }
     }
 
-    fn label(item: &MenuItem<ClaudeTray>) -> String {
-        match item {
-            MenuItem::Standard(s) => s.label.clone(),
-            _ => panic!("not a standard item"),
-        }
-    }
-
     #[test]
     fn every_state_with_an_address_is_reachable() {
         for status in ["waiting", "idle", "busy", "shell"] {
@@ -258,14 +252,6 @@ mod tests {
     #[test]
     fn a_row_with_nowhere_to_go_is_inert() {
         assert!(!enabled(&row(&entry("busy", None), 0, 0)));
-    }
-
-    #[test]
-    fn a_rows_age_counts_on_while_the_menu_is_open() {
-        let fresh = label(&row(&entry("idle", somewhere()), 0, 0));
-        let later = label(&row(&entry("idle", somewhere()), 0, 120));
-        assert!(fresh.ends_with("idle 1m"), "{fresh}");
-        assert!(later.ends_with("idle 3m"), "{later}");
     }
 
     #[test]
