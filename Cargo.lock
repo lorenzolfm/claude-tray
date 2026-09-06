@@ -83,13 +83,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "claude-nav"
+version = "0.1.0"
+source = "git+https://github.com/lorenzolfm/claude-nav#9dfb7f9e1d479958b8af604e27fe732125b0050b"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "claude-tray"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "claude-nav",
  "ksni",
- "serde",
- "serde_json",
 ]
 
 [[package]]
